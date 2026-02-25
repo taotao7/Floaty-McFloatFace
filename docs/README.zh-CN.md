@@ -68,6 +68,7 @@ git push origin main --tags
 - Linux 在部分窗口管理器下，透明窗口/点击穿透表现可能不一致
 - `list_cameras` Rust 命令为预留接口，摄像头枚举由前端 `MediaDevices` API 完成
 - macOS 按键展示功能需要辅助功能权限
+- 按键展示目前仅支持 macOS（使用 CoreGraphics 事件监听），Linux 和 Windows 支持计划中
 
 ## 贡献
 

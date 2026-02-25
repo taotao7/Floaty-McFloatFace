@@ -68,6 +68,7 @@ git push origin main --tags
 - Transparent window / click-through behavior may vary on some Linux window managers.
 - `list_cameras` Rust command is a placeholder; camera enumeration is handled by the frontend `MediaDevices` API.
 - macOS requires Accessibility permission for the keyboard display feature.
+- Keyboard display currently only works on macOS (uses CoreGraphics event tap). Linux and Windows support is planned.
 
 ## Contributing
 
