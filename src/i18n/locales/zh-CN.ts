@@ -43,4 +43,13 @@ export const zhCN = {
   auto_saved: "已自动保存",
   appearance: "外观",
   language: "语言",
+  keyboard_display: "按键展示",
+  keyboard_show: "显示按键",
+  keyboard_show_hint: "在屏幕上展示按下的键",
+  keyboard_hide: "隐藏按键",
+  keyboard_open_settings: "打开设置",
+  keyboard_fade_out: "消失延迟",
+  keyboard_fade_out_hint: "按键松开后停留时间（毫秒）",
+  keyboard_width: "展示宽度",
+  keyboard_width_hint: "按键展示窗口的宽度（像素）",
 };

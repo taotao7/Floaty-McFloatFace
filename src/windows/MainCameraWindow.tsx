@@ -1,6 +1,6 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
-import { Lock, LockOpen, FlipHorizontal2, Settings } from "lucide-react";
+import { Lock, LockOpen, FlipHorizontal2, Settings, Keyboard } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defaultSettings, type AppSettings, type CameraDevice, type RuntimeState } from "../types/app";
 import { listBrowserCameras, startAdaptiveStream, stopStream } from "../lib/camera";
@@ -9,6 +9,7 @@ import {
   openSettingsWindow,
   saveAppSettings,
   startDragMainWindow,
+  toggleKeyboardWindow,
   toggleMainWindowVisibility,
 } from "../lib/tauri";
 import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
@@ -114,19 +115,32 @@ function MainCameraContent() {
     return () => { void unlistenPromise.then((unlisten) => unlisten()); };
   }, []);
 
+  // Re-acquire camera when settings window releases its temp stream
+  useEffect(() => {
+    const unlistenPromise = listen("app://camera-reacquire", () => {
+      void attachStream();
+    });
+    return () => { void unlistenPromise.then((unlisten) => unlisten()); };
+  }, [attachStream]);
+
   useEffect(() => {
     const hotkeys = async () => {
-      await register("CommandOrControl+Shift+V", async () => {
-        await toggleMainWindowVisibility();
-      });
-      await register("CommandOrControl+Shift+L", async () => {
-        const next = { ...settings, locked: !settings.locked };
-        await syncSettings(next);
-        await emit("app://hotkey-triggered", { action: "toggle_lock" });
-      });
-      await register("CommandOrControl+Shift+,", async () => {
-        await openSettingsWindow();
-      });
+      try {
+        await unregisterAll();
+      } catch { /* ignore */ }
+      try {
+        await register("CommandOrControl+Shift+V", async () => {
+          await toggleMainWindowVisibility();
+        });
+        await register("CommandOrControl+Shift+L", async () => {
+          const next = { ...settings, locked: !settings.locked };
+          await syncSettings(next);
+          await emit("app://hotkey-triggered", { action: "toggle_lock" });
+        });
+        await register("CommandOrControl+Shift+,", async () => {
+          await openSettingsWindow();
+        });
+      } catch { /* hotkey registration may fail if already taken */ }
     };
     void hotkeys();
     return () => { void unregisterAll(); };
@@ -156,7 +170,13 @@ function MainCameraContent() {
 
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    setCtxMenu({ x: e.clientX, y: e.clientY });
+    const menuWidth = 180;
+    const menuHeight = 200;
+    // Clamp menu inside the visible window area with padding
+    const pad = 8;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - pad);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - pad);
+    setCtxMenu({ x: Math.max(pad, x), y: Math.max(pad, y) });
   };
 
   const shapeClass = useMemo(() => `shape-${settings.shape}`, [settings.shape]);
@@ -234,6 +254,14 @@ function MainCameraContent() {
             setCtxMenu(null);
           }}>
             <Settings size={14} /> {t.open_settings}
+          </button>
+          <button type="button" onClick={async () => {
+            const next = { ...settings, keyboardDisplayEnabled: !settings.keyboardDisplayEnabled };
+            await toggleKeyboardWindow(next.keyboardDisplayEnabled);
+            void syncSettings(next);
+            setCtxMenu(null);
+          }}>
+            <Keyboard size={14} /> {settings.keyboardDisplayEnabled ? t.keyboard_hide : t.keyboard_show}
           </button>
         </div>
       )}

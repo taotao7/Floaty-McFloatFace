@@ -19,6 +19,11 @@ export interface AppSettings {
   beautySmoothness: number;
   beautyBrightness: number;
   locale: string;
+  keyboardDisplayEnabled: boolean;
+  keyboardDisplayPosition: "bottom-center" | "top-center" | "bottom-left" | "bottom-right";
+  keyboardDisplayScale: number;
+  keyboardDisplayFadeOut: number;
+  keyboardDisplayWidth: number;
 }
 
 export interface RuntimeState {
@@ -41,4 +46,15 @@ export const defaultSettings: AppSettings = {
   beautySmoothness: 30,
   beautyBrightness: 50,
   locale: "",
+  keyboardDisplayEnabled: true,
+  keyboardDisplayPosition: "bottom-center",
+  keyboardDisplayScale: 1,
+  keyboardDisplayFadeOut: 2000,
+  keyboardDisplayWidth: 800,
 };
+
+export interface KeyEvent {
+  key: string;
+  modifiers: string[];
+  timestamp: number;
+}

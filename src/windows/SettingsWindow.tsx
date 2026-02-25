@@ -1,4 +1,4 @@
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { gsap } from "gsap";
 import { Camera, Lock, Palette, Pin, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +16,7 @@ import {
   saveAppSettings,
   setAlwaysOnTop,
   setClickThrough,
+  toggleKeyboardWindow,
 } from "../lib/tauri";
 import { defaultSettings, type AppSettings, type CameraDevice, type ShapePreset } from "../types/app";
 import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
@@ -35,10 +36,14 @@ function SettingsContent() {
 
   useEffect(() => {
     const load = async () => {
-      // Request temporary camera access so enumerateDevices returns full info
+      // Request temporary camera access so enumerateDevices returns labels.
+      // Stopping the temp stream may interrupt the main window's camera on macOS,
+      // so we emit an event afterwards to let it re-acquire.
       try {
         const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
         tempStream.getTracks().forEach((track) => track.stop());
+        // Notify main window to re-acquire camera after we released the temp stream
+        await emit("app://camera-reacquire");
       } catch {
         // Permission denied — still try to enumerate
       }
@@ -291,6 +296,59 @@ function SettingsContent() {
                 }}
               />
               <p className="hint">{t.current_prefix} {settings.beautyBrightness}%{t.brightness_original_hint}</p>
+            </div>
+          </>
+        )}
+      </Card>
+
+      <Card className="settings-section">
+        <div className="section-title">
+          <Sparkles size={16} />
+          <h2>{t.keyboard_display}</h2>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <Label>{t.keyboard_show}</Label>
+            <p className="hint">{t.keyboard_show_hint}</p>
+          </div>
+          <Switch
+            checked={settings.keyboardDisplayEnabled}
+            onCheckedChange={async (checked) => {
+              await toggleKeyboardWindow(checked);
+              void commit({ ...settings, keyboardDisplayEnabled: checked });
+            }}
+          />
+        </div>
+
+        {settings.keyboardDisplayEnabled && (
+          <>
+            <div className="space-y-2" style={{ padding: "10px 0" }}>
+              <Label>{t.keyboard_fade_out}</Label>
+              <Slider
+                value={[settings.keyboardDisplayFadeOut]}
+                min={500}
+                max={5000}
+                step={100}
+                onValueChange={(value) => {
+                  void commit({ ...settings, keyboardDisplayFadeOut: value[0] });
+                }}
+              />
+              <p className="hint">{t.current_prefix} {settings.keyboardDisplayFadeOut}ms</p>
+            </div>
+
+            <div className="space-y-2" style={{ padding: "10px 0" }}>
+              <Label>{t.keyboard_width}</Label>
+              <Slider
+                value={[settings.keyboardDisplayWidth]}
+                min={400}
+                max={1400}
+                step={50}
+                onValueChange={(value) => {
+                  void commit({ ...settings, keyboardDisplayWidth: value[0] });
+                }}
+              />
+              <p className="hint">{t.current_prefix} {settings.keyboardDisplayWidth}px</p>
             </div>
           </>
         )}

@@ -32,3 +32,7 @@ export async function openSettingsWindow(): Promise<void> {
 export async function startDragMainWindow(): Promise<void> {
   await invoke("start_drag_main_window");
 }
+
+export async function toggleKeyboardWindow(enabled: boolean): Promise<void> {
+  await invoke("toggle_keyboard_window", { enabled });
+}

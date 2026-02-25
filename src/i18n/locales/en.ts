@@ -43,4 +43,13 @@ export const en = {
   auto_saved: "Auto-saved",
   appearance: "Appearance",
   language: "Language",
+  keyboard_display: "Keyboard Display",
+  keyboard_show: "Show Keys",
+  keyboard_show_hint: "Display pressed keys on screen",
+  keyboard_hide: "Hide Keys",
+  keyboard_open_settings: "Open Settings",
+  keyboard_fade_out: "Fade Delay",
+  keyboard_fade_out_hint: "How long keys stay after release (ms)",
+  keyboard_width: "Display Width",
+  keyboard_width_hint: "Width of the keyboard display window (px)",
 };
