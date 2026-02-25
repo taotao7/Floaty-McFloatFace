@@ -34,6 +34,18 @@ brew install --cask floaty-mcfloatface
 
 前往 [GitHub Releases](https://github.com/taotao7/Floaty-McFloatFace/releases) 下载最新版本。
 
+### macOS 注意事项
+
+应用未经 Apple 代码签名，macOS Gatekeeper 可能会阻止打开。安装后运行：
+
+```bash
+xattr -cr "/Applications/Floaty McFloatFace.app"
+```
+
+应用需要以下权限：
+- **摄像头权限** — 首次启动时会弹窗请求
+- **辅助功能权限** — 按键展示功能需要（系统设置 → 隐私与安全性 → 辅助功能）
+
 ## 开发
 
 ```bash

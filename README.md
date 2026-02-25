@@ -34,6 +34,18 @@ brew install --cask floaty-mcfloatface
 
 Grab the latest release from [GitHub Releases](https://github.com/taotao7/Floaty-McFloatFace/releases).
 
+### macOS Notes
+
+Since the app is not code-signed, macOS Gatekeeper may block it. Run this after installing:
+
+```bash
+xattr -cr "/Applications/Floaty McFloatFace.app"
+```
+
+The app requires:
+- **Camera permission** — prompted on first launch
+- **Accessibility permission** — required for keyboard display (System Settings → Privacy & Security → Accessibility)
+
 ## Development
 
 ```bash
