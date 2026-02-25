@@ -92,6 +92,17 @@ fn keycode_to_string(keycode: i64) -> Option<&'static str> {
         0x28 => Some("K"),
         0x2D => Some("N"),
         0x2E => Some("M"),
+        0x2A => Some("\\"),
+        0x2B => Some(","),
+        0x2C => Some("/"),
+        0x2F => Some("."),
+        0x18 => Some("="),
+        0x1B => Some("-"),
+        0x1E => Some("]"),
+        0x21 => Some("["),
+        0x27 => Some("'"),
+        0x29 => Some(";"),
+        0x32 => Some("`"),
         0x30 => Some("Tab"),
         0x31 => Some("Space"),
         0x33 => Some("⌫"),
@@ -137,6 +148,7 @@ const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
 const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
 const K_CG_EVENT_KEY_DOWN: u32 = 10;
 const K_CG_EVENT_KEY_UP: u32 = 11;
+const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
 const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -148,13 +160,70 @@ extern "C" {
     ) -> CFMachPortRef;
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+    fn CGEventGetFlags(event: CGEventRef) -> u64;
+    fn CGEventKeyboardGetUnicodeString(
+        event: CGEventRef,
+        max_len: u64,
+        actual_len: *mut u64,
+        buf: *mut u16,
+    );
 }
+
+// CGEventFlags bitmasks for modifier keys
+const K_CG_EVENT_FLAG_SHIFT: u64 = 0x00020000;
+const K_CG_EVENT_FLAG_CONTROL: u64 = 0x00040000;
+const K_CG_EVENT_FLAG_ALTERNATE: u64 = 0x00080000; // Alt/Option
+const K_CG_EVENT_FLAG_COMMAND: u64 = 0x00100000;
+const K_CG_EVENT_FLAG_CAPS_LOCK: u64 = 0x00010000;
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Check if a keycode is a special (non-character) key that should always use keycode_to_string.
+fn is_special_key(keycode: i64) -> bool {
+    matches!(
+        keycode,
+        0x24 | 0x30 | 0x31 | 0x33 | 0x35 | // Return, Tab, Space, Backspace, Esc
+        0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | // Modifiers
+        0x60..=0x65 | 0x67 | 0x6D | 0x6F | // F5-F12
+        0x73..=0x79 | 0x7A..=0x7E // Navigation, F1-F4, Arrows
+    )
+}
+
+/// Get the actual unicode character from a key event.
+fn unicode_string_from_event(event: CGEventRef) -> Option<String> {
+    let mut actual_len: u64 = 0;
+    let mut buf: [u16; 4] = [0; 4];
+    unsafe {
+        CGEventKeyboardGetUnicodeString(event, 4, &mut actual_len, buf.as_mut_ptr());
+    }
+    if actual_len == 0 {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..actual_len as usize]);
+    let ch = s.chars().next()?;
+    // Only use if it's a printable, non-control character
+    if ch.is_control() {
+        return None;
+    }
+    // Uppercase letters for consistent display
+    Some(ch.to_uppercase().to_string())
+}
+
+/// Map modifier keycode to its corresponding CGEventFlags bitmask.
+fn modifier_keycode_to_flag(keycode: i64) -> Option<u64> {
+    match keycode {
+        0x36 | 0x37 => Some(K_CG_EVENT_FLAG_COMMAND),
+        0x38 | 0x3C => Some(K_CG_EVENT_FLAG_SHIFT),
+        0x39 => Some(K_CG_EVENT_FLAG_CAPS_LOCK),
+        0x3A | 0x3D => Some(K_CG_EVENT_FLAG_ALTERNATE),
+        0x3B | 0x3E => Some(K_CG_EVENT_FLAG_CONTROL),
+        _ => None,
+    }
 }
 
 extern "C" fn tap_callback(
@@ -166,19 +235,50 @@ extern "C" fn tap_callback(
     let app = unsafe { &*(user_info as *const AppHandle) };
     let keycode = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
 
-    if let Some(key_str) = keycode_to_string(keycode) {
-        let event_name = match event_type {
-            K_CG_EVENT_KEY_DOWN => "app://key-pressed",
-            K_CG_EVENT_KEY_UP => "app://key-released",
-            _ => return event,
-        };
-        let payload = KeyEventPayload {
-            key: key_str.to_string(),
-            modifiers: vec![],
-            timestamp: now_millis(),
-        };
-        let _ = app.emit(event_name, payload);
-    }
+    let key_str_owned: String;
+    let key_display = if event_type != K_CG_EVENT_FLAGS_CHANGED && !is_special_key(keycode) {
+        // For regular character keys, try to get the actual typed character (handles Shift+number etc.)
+        if let Some(s) = unicode_string_from_event(event) {
+            key_str_owned = s;
+            key_str_owned.as_str()
+        } else {
+            match keycode_to_string(keycode) {
+                Some(s) => s,
+                None => return event,
+            }
+        }
+    } else {
+        match keycode_to_string(keycode) {
+            Some(s) => s,
+            None => return event,
+        }
+    };
+
+    let event_name = match event_type {
+        K_CG_EVENT_KEY_DOWN => "app://key-pressed",
+        K_CG_EVENT_KEY_UP => "app://key-released",
+        K_CG_EVENT_FLAGS_CHANGED => {
+            // Determine press/release by checking if the modifier flag is active
+            if let Some(flag) = modifier_keycode_to_flag(keycode) {
+                let flags = unsafe { CGEventGetFlags(event) };
+                if flags & flag != 0 {
+                    "app://key-pressed"
+                } else {
+                    "app://key-released"
+                }
+            } else {
+                return event;
+            }
+        }
+        _ => return event,
+    };
+
+    let payload = KeyEventPayload {
+        key: key_display.to_string(),
+        modifiers: vec![],
+        timestamp: now_millis(),
+    };
+    let _ = app.emit(event_name, payload);
 
     event
 }
@@ -193,7 +293,7 @@ pub fn start_keyboard_listener(app: AppHandle) {
     let app = Arc::new(app);
 
     std::thread::spawn(move || {
-        let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN) | (1 << K_CG_EVENT_KEY_UP);
+        let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN) | (1 << K_CG_EVENT_KEY_UP) | (1 << K_CG_EVENT_FLAGS_CHANGED);
         let user_info = Arc::into_raw(app) as *mut c_void;
 
         unsafe {
