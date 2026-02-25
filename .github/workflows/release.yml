@@ -60,3 +60,43 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  update-homebrew:
+    needs: build
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Update Homebrew Cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG_URL="https://github.com/taotao7/Floaty-McFloatFace/releases/download/${GITHUB_REF_NAME}/floaty-mcfloatface_${VERSION}_aarch64.dmg"
+
+          # Download and compute SHA256
+          curl -sL "$DMG_URL" -o floaty.dmg
+          SHA256=$(shasum -a 256 floaty.dmg | awk '{print $1}')
+
+          # Clone tap repo
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/taotao7/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+
+          cat > tap/Casks/floaty-mcfloatface.rb <<CASK
+          cask "floaty-mcfloatface" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+            url "https://github.com/taotao7/Floaty-McFloatFace/releases/download/v#{version}/floaty-mcfloatface_#{version}_aarch64.dmg"
+            name "Floaty McFloatFace"
+            desc "Camera overlay for streaming and screen recording"
+            homepage "https://github.com/taotao7/Floaty-McFloatFace"
+            app "floaty-mcfloatface.app"
+            zap trash: ["~/Library/Application Support/com.tao.floaty-mcfloatface"]
+          end
+          CASK
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Update floaty-mcfloatface to ${VERSION}" || exit 0
+          git push
