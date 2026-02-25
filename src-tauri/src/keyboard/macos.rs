@@ -4,6 +4,54 @@ use tauri::{AppHandle, Emitter};
 
 use super::KeyEventPayload;
 
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFDictionaryCreate(
+        allocator: *const c_void,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        num_values: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> *const c_void;
+    fn CFRelease(cf: *const c_void);
+    fn CFMachPortCreateRunLoopSource(
+        allocator: *const c_void, port: CFMachPortRef, order: i64,
+    ) -> CFRunLoopSourceRef;
+    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
+    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: *const c_void);
+    fn CFRunLoopRun();
+    static kCFBooleanTrue: *const c_void;
+    static kCFAllocatorDefault: *const c_void;
+    static kCFRunLoopCommonModes: *const c_void;
+}
+
+// ApplicationServices FFI for accessibility check
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    static kAXTrustedCheckOptionPrompt: *const c_void;
+}
+
+/// Check if accessibility is trusted, and prompt the user if not.
+fn ensure_accessibility_permission() -> bool {
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt];
+        let values = [kCFBooleanTrue];
+        let options = CFDictionaryCreate(
+            kCFAllocatorDefault,
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        let trusted = AXIsProcessTrustedWithOptions(options);
+        CFRelease(options);
+        trusted
+    }
+}
+
 /// Map macOS virtual keycode to display string.
 fn keycode_to_string(keycode: i64) -> Option<&'static str> {
     match keycode {
@@ -83,7 +131,6 @@ type CGEventTapProxy = *mut c_void;
 type CFMachPortRef = *mut c_void;
 type CFRunLoopSourceRef = *mut c_void;
 type CFRunLoopRef = *mut c_void;
-type CFAllocatorRef = *const c_void;
 
 const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
@@ -101,18 +148,6 @@ extern "C" {
     ) -> CFMachPortRef;
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
-    fn CFMachPortCreateRunLoopSource(
-        allocator: CFAllocatorRef, port: CFMachPortRef, order: i64,
-    ) -> CFRunLoopSourceRef;
-    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: *const c_void);
-    fn CFRunLoopRun();
-    static kCFRunLoopCommonModes: *const c_void;
-    static kCFAllocatorDefault: CFAllocatorRef;
 }
 
 fn now_millis() -> u64 {
@@ -149,6 +184,12 @@ extern "C" fn tap_callback(
 }
 
 pub fn start_keyboard_listener(app: AppHandle) {
+    // Check and prompt for accessibility permission on the main thread
+    if !ensure_accessibility_permission() {
+        eprintln!("Accessibility permission not granted — keyboard display will not work until permission is granted and app is restarted.");
+        return;
+    }
+
     let app = Arc::new(app);
 
     std::thread::spawn(move || {
