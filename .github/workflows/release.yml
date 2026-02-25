@@ -68,7 +68,7 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          DMG_URL="https://github.com/taotao7/Floaty-McFloatFace/releases/download/${GITHUB_REF_NAME}/floaty-mcfloatface_${VERSION}_aarch64.dmg"
+          DMG_URL="https://github.com/taotao7/Floaty-McFloatFace/releases/download/${GITHUB_REF_NAME}/Floaty.McFloatFace_${VERSION}_aarch64.dmg"
 
           # Download and compute SHA256
           curl -sL "$DMG_URL" -o floaty.dmg
@@ -82,11 +82,11 @@ jobs:
           cask "floaty-mcfloatface" do
             version "${VERSION}"
             sha256 "${SHA256}"
-            url "https://github.com/taotao7/Floaty-McFloatFace/releases/download/v#{version}/floaty-mcfloatface_#{version}_aarch64.dmg"
+            url "https://github.com/taotao7/Floaty-McFloatFace/releases/download/v#{version}/Floaty.McFloatFace_#{version}_aarch64.dmg"
             name "Floaty McFloatFace"
             desc "Camera overlay for streaming and screen recording"
             homepage "https://github.com/taotao7/Floaty-McFloatFace"
-            app "floaty-mcfloatface.app"
+            app "Floaty McFloatFace.app"
             zap trash: ["~/Library/Application Support/com.tao.floaty-mcfloatface"]
           end
           CASK
