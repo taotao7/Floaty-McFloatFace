@@ -1,55 +1,79 @@
 # Floaty McFloatFace
 
-Floaty McFloatFace 是一个桌面摄像头浮窗工具，面向录屏/直播场景，提供透明异形摄像头窗口与独立设置窗口。
+A desktop camera overlay for streaming and screen recording. Show your face in a floating, always-on-top window with customizable shapes, beauty filters, and a keyboard display overlay.
 
-## 开源声明
+[中文文档](docs/README.zh-CN.md)
 
-这是一个**开源项目**，欢迎社区参与改进与贡献（Issue / PR / 讨论）。
+## Features
 
-## 技术栈
+- **Camera Overlay** — Floating, borderless, always-on-top camera window
+- **Shape Presets** — Circle, Rounded Square, Mickey
+- **Beauty Filter** — Skin smoothing and brightness adjustment
+- **Keyboard Display** — Show pressed keys on screen with fade-out animation, perfect for tutorials and live demos
+- **Draggable** — Drag both camera and keyboard windows anywhere, positions are remembered
+- **Right-click Menu** — Quick access to settings, lock, mirror, and keyboard toggle
+- **System Tray** — Show/hide camera, toggle keyboard, open settings, lock drag, quit
+- **Hotkeys**
+  - `Cmd/Ctrl + Shift + V` — Show/Hide camera
+  - `Cmd/Ctrl + Shift + L` — Lock/Unlock drag
+  - `Cmd/Ctrl + Shift + ,` — Open settings
+- **Settings Window** — Camera selection, shape, scale, mirror, beauty, keyboard display (fade delay, width)
+- **i18n** — English and 中文
+- **Cross-platform** — macOS, Linux, Windows
 
-- Bun + React + TypeScript + Vite
-- Tauri v2 + Rust
-- shadcn 风格组件（Radix + CVA）
-- GSAP 动画
+## Install
 
-## 已实现功能
+### Homebrew (macOS)
 
-- 多窗口架构：`main` 摄像头窗 + `settings` 设置窗
-- 透明无边框摄像头窗，默认置顶、可拖拽
-- 异形窗口模板：`Circle`、`Rounded Square`、`Mickey`
-- 摄像头选择与自动自适应质量（1080p -> 720p -> 480p）
-- 托盘菜单：显示/隐藏、打开设置、锁定拖拽、退出
-- 全局快捷键：
-  - `Cmd/Ctrl + Shift + V`：显示/隐藏主窗
-  - `Cmd/Ctrl + Shift + L`：锁定/解锁拖拽
-  - `Cmd/Ctrl + Shift + ,`：打开设置窗
-- 设置持久化（Tauri Store）
-- 前后端事件：
-  - `app://settings-updated`
-  - `app://hotkey-triggered`
-  - `app://camera-error`
+```bash
+brew tap taotao7/tap
+brew install --cask floaty-mcfloatface
+```
 
-## 开发与运行
+### Download
+
+Grab the latest release from [GitHub Releases](https://github.com/taotao7/Floaty-McFloatFace/releases).
+
+## Development
 
 ```bash
 bun install
 bun run tauri dev
 ```
 
-## 构建
+## Build
 
 ```bash
 bun run tauri build
 ```
 
-## 贡献建议
+## Version Bump
 
-- 提交前请至少运行：`bun run build` 与 `cargo check`（在 `src-tauri` 目录）
-- 若修改公共接口（命令/事件/类型），请同步更新文档
+```bash
+./scripts/bump.sh 0.3.0
+git add -A && git commit -m "chore: bump version to 0.3.0"
+git tag v0.3.0
+git push origin main --tags
+```
 
-## 已知限制
+## Tech Stack
 
-- Linux 在部分窗口管理器下，透明窗口/点击穿透表现可能不一致。
-- `list_cameras` Rust 命令已预留接口，当前实际摄像头枚举由前端 `MediaDevices` 执行。
-- 首版不包含虚拟摄像头输出、不包含用户自定义快捷键。
+- Tauri v2 + Rust
+- React + TypeScript + Vite
+- Tailwind CSS + Radix UI
+- GSAP animations
+
+## Known Limitations
+
+- Transparent window / click-through behavior may vary on some Linux window managers.
+- `list_cameras` Rust command is a placeholder; camera enumeration is handled by the frontend `MediaDevices` API.
+- macOS requires Accessibility permission for the keyboard display feature.
+
+## Contributing
+
+- Run `bun run build` and `cargo check` (in `src-tauri`) before submitting.
+- If you modify public interfaces (commands/events/types), please update docs accordingly.
+
+## License
+
+MIT
