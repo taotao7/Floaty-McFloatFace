@@ -1,18 +1,10 @@
-use serde::Serialize;
 use std::ffi::c_void;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyEventPayload {
-    pub key: String,
-    pub modifiers: Vec<String>,
-    pub timestamp: u64,
-}
+use super::KeyEventPayload;
 
 /// Map macOS virtual keycode to display string.
-/// Avoids TSM APIs (which require the main thread) by using static keycode mapping.
 fn keycode_to_string(keycode: i64) -> Option<&'static str> {
     match keycode {
         0x00 => Some("A"),
@@ -86,7 +78,6 @@ fn keycode_to_string(keycode: i64) -> Option<&'static str> {
     }
 }
 
-// CoreGraphics FFI — only the bits we need for a listen-only event tap.
 type CGEventRef = *mut c_void;
 type CGEventTapProxy = *mut c_void;
 type CFMachPortRef = *mut c_void;
@@ -104,10 +95,7 @@ const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
+        tap: u32, place: u32, options: u32, events_of_interest: u64,
         callback: extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef,
         user_info: *mut c_void,
     ) -> CFMachPortRef;
@@ -118,9 +106,7 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFMachPortCreateRunLoopSource(
-        allocator: CFAllocatorRef,
-        port: CFMachPortRef,
-        order: i64,
+        allocator: CFAllocatorRef, port: CFMachPortRef, order: i64,
     ) -> CFRunLoopSourceRef;
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: *const c_void);
@@ -167,7 +153,6 @@ pub fn start_keyboard_listener(app: AppHandle) {
 
     std::thread::spawn(move || {
         let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN) | (1 << K_CG_EVENT_KEY_UP);
-        // Intentionally leak the Arc — the listener lives for the entire process.
         let user_info = Arc::into_raw(app) as *mut c_void;
 
         unsafe {
