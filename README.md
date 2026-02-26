@@ -4,6 +4,8 @@ A desktop camera overlay for streaming and screen recording. Show your face in a
 
 [中文文档](docs/README.zh-CN.md)
 
+<img width="2334" height="1962" alt="image" src="https://github.com/user-attachments/assets/e3264a6c-b9b1-4c61-884e-a58f446562b6" />
+
 ## Features
 
 - **Camera Overlay** — Floating, borderless, always-on-top camera window
