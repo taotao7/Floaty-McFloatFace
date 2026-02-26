@@ -36,3 +36,7 @@ export async function startDragMainWindow(): Promise<void> {
 export async function toggleKeyboardWindow(enabled: boolean): Promise<void> {
   await invoke("toggle_keyboard_window", { enabled });
 }
+
+export async function openCameraPrivacySettings(): Promise<void> {
+  await invoke("open_camera_privacy_settings");
+}

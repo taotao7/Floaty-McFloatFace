@@ -7,6 +7,7 @@ import { listBrowserCameras, startAdaptiveStream, stopStream } from "../lib/came
 import {
   getAppSettings,
   openSettingsWindow,
+  openCameraPrivacySettings,
   saveAppSettings,
   startDragMainWindow,
   toggleKeyboardWindow,
@@ -36,21 +37,17 @@ function MainCameraContent() {
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
 
   const syncSettings = useCallback(async (next: AppSettings) => {
     setSettings(next);
     await saveAppSettings(next);
   }, []);
 
-  const refreshDevices = useCallback(async () => {
-    const cameraList = await listBrowserCameras();
-    setDevices(cameraList);
-    if (!cameraList.length) {
-      setStatus(t.no_camera_detected);
-    }
-  }, [t]);
-
-  const attachStream = useCallback(async () => {
+  const connectCamera = useCallback(async (cameraId?: string) => {
     if (!navigator.mediaDevices) {
       setRuntime((prev) => ({ ...prev, permission: "denied", streamReady: false }));
       setStatus(t.media_devices_unavailable);
@@ -60,53 +57,75 @@ function MainCameraContent() {
 
     try {
       stopStream(streamRef.current);
-      const stream = await startAdaptiveStream(settings.selectedCameraId);
+      const targetId = cameraId
+        || settingsRef.current.selectedCameraId
+        || (devicesRef.current.length > 0 ? devicesRef.current[0].deviceId : undefined);
+      const stream = await startAdaptiveStream(targetId);
       streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
+      if (videoRef.current) videoRef.current.srcObject = stream;
 
       setRuntime((prev) => ({ ...prev, permission: "granted", streamReady: true }));
       setStatus(t.camera_connected);
       setTimeout(() => setStatusHidden(true), 1500);
     } catch (error) {
+      const isDenied = error instanceof DOMException && error.name === "NotAllowedError";
       setRuntime((prev) => ({ ...prev, permission: "denied", streamReady: false }));
       setStatus(t.camera_access_denied);
       setStatusHidden(false);
+      if (isDenied) {
+        await openCameraPrivacySettings();
+      }
       await emit("app://camera-error", {
         message: error instanceof Error ? error.message : "camera_unavailable",
       });
     }
-  }, [settings.selectedCameraId, t]);
+  }, [t]);
 
+  // Bootstrap: load settings → enumerate → connect
   useEffect(() => {
     let mounted = true;
     const bootstrap = async () => {
+      if (!navigator.mediaDevices) return;
+
       const persisted = await getAppSettings();
       if (!mounted) return;
       setSettings(persisted);
-      await refreshDevices();
+
+      const cameraList = await listBrowserCameras();
+      if (!mounted) return;
+      setDevices(cameraList);
+
+      const targetId = persisted.selectedCameraId
+        || (cameraList.length > 0 ? cameraList[0].deviceId : undefined);
+      await connectCamera(targetId);
+      if (!mounted) return;
+
+      // Re-enumerate after permission granted (labels become available)
+      const updatedList = await listBrowserCameras();
+      if (mounted) setDevices(updatedList);
     };
     void bootstrap();
     return () => { mounted = false; };
-  }, [refreshDevices]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Re-connect when user changes camera in settings
   useEffect(() => {
-    if (!devices.length && !settings.selectedCameraId) return;
-    void attachStream();
+    if (!settings.selectedCameraId) return;
+    void connectCamera(settings.selectedCameraId);
     return () => { stopStream(streamRef.current); };
-  }, [devices.length, settings.selectedCameraId, attachStream]);
+  }, [settings.selectedCameraId, connectCamera]);
 
+  // Handle hot-plug
   useEffect(() => {
     if (!navigator.mediaDevices) return;
     const onDeviceChanged = async () => {
-      await refreshDevices();
-      await attachStream();
+      const cameraList = await listBrowserCameras();
+      setDevices(cameraList);
+      await connectCamera();
     };
     navigator.mediaDevices.addEventListener("devicechange", onDeviceChanged);
     return () => navigator.mediaDevices.removeEventListener("devicechange", onDeviceChanged);
-  }, [attachStream, refreshDevices]);
+  }, [connectCamera]);
 
   useEffect(() => {
     const unlistenPromise = listen<AppSettings>("app://settings-updated", (event) => {
@@ -118,10 +137,10 @@ function MainCameraContent() {
   // Re-acquire camera when settings window releases its temp stream
   useEffect(() => {
     const unlistenPromise = listen("app://camera-reacquire", () => {
-      void attachStream();
+      void connectCamera();
     });
     return () => { void unlistenPromise.then((unlisten) => unlisten()); };
-  }, [attachStream]);
+  }, [connectCamera]);
 
   useEffect(() => {
     const hotkeys = async () => {
@@ -224,7 +243,7 @@ function MainCameraContent() {
       <div className={`camera-status ${statusHidden ? "hidden" : ""}`}>{status}</div>
 
       {runtime.permission === "denied" && (
-        <button type="button" className="retry-button" onClick={() => { void attachStream(); }}>
+        <button type="button" className="retry-button" onClick={() => { void connectCamera(); }}>
           {t.retry_camera}
         </button>
       )}

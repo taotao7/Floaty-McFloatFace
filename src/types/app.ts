@@ -1,4 +1,5 @@
 export type ShapePreset = "circle" | "roundedSquare" | "mickey";
+export type KeyboardDisplayStyle = "dark" | "light" | "glass" | "outline";
 
 export interface CameraDevice {
   deviceId: string;
@@ -24,6 +25,7 @@ export interface AppSettings {
   keyboardDisplayScale: number;
   keyboardDisplayFadeOut: number;
   keyboardDisplayWidth: number;
+  keyboardDisplayStyle: KeyboardDisplayStyle;
 }
 
 export interface RuntimeState {
@@ -51,6 +53,7 @@ export const defaultSettings: AppSettings = {
   keyboardDisplayScale: 1,
   keyboardDisplayFadeOut: 2000,
   keyboardDisplayWidth: 800,
+  keyboardDisplayStyle: "dark",
 };
 
 export interface KeyEvent {

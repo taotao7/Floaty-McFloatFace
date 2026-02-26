@@ -35,6 +35,8 @@ Floaty McFloatFace 是一个桌面开源项目，用于在录屏/直播场景中
 - `app://settings-updated`：设置保存后广播
 - `app://hotkey-triggered`：托盘/快捷键动作事件
 - `app://camera-error`：摄像头权限/占用/断连错误
+- `app://accessibility-status`：辅助功能权限状态 `{ granted: bool }`
+- `app://event-tap-status`：键盘事件监听状态 `{ active: bool }`（输入监控权限相关）
 
 ## 快捷键（默认）
 
@@ -59,3 +61,4 @@ bun run tauri build
 ## 注意事项
 
 - Linux 在部分窗口管理器下，透明窗/穿透行为可能不一致。
+- macOS 键盘展示功能需要辅助功能 + 输入监控两项权限。从 Finder 启动时 app 自身需要输入监控权限，从终端运行二进制则继承终端的权限。`CGEventTapCreate` 失败时会重试并通过 `app://event-tap-status` 通知前端。

@@ -45,6 +45,7 @@ xattr -cr "/Applications/Floaty McFloatFace.app"
 The app requires:
 - **Camera permission** — prompted on first launch
 - **Accessibility permission** — required for keyboard display (System Settings → Privacy & Security → Accessibility)
+- **Input Monitoring permission** — required for keyboard display when launched from Finder (System Settings → Privacy & Security → Input Monitoring)
 
 ## Development
 
@@ -79,7 +80,7 @@ git push origin main --tags
 
 - Transparent window / click-through behavior may vary on some Linux window managers.
 - `list_cameras` Rust command is a placeholder; camera enumeration is handled by the frontend `MediaDevices` API.
-- macOS requires Accessibility permission for the keyboard display feature.
+- macOS requires Accessibility and Input Monitoring permissions for the keyboard display feature. The app will show a hint if either permission is missing.
 - Keyboard display currently only works on macOS (uses CoreGraphics event tap). Linux and Windows support is planned.
 
 ## Contributing

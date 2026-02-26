@@ -45,6 +45,7 @@ xattr -cr "/Applications/Floaty McFloatFace.app"
 应用需要以下权限：
 - **摄像头权限** — 首次启动时会弹窗请求
 - **辅助功能权限** — 按键展示功能需要（系统设置 → 隐私与安全性 → 辅助功能）
+- **输入监控权限** — 从 Finder 启动时按键展示需要（系统设置 → 隐私与安全性 → 输入监控）
 
 ## 开发
 
@@ -79,7 +80,7 @@ git push origin main --tags
 
 - Linux 在部分窗口管理器下，透明窗口/点击穿透表现可能不一致
 - `list_cameras` Rust 命令为预留接口，摄像头枚举由前端 `MediaDevices` API 完成
-- macOS 按键展示功能需要辅助功能权限
+- macOS 按键展示功能需要辅助功能和输入监控两项权限，缺少时会在按键窗口显示提示
 - 按键展示目前仅支持 macOS（使用 CoreGraphics 事件监听），Linux 和 Windows 支持计划中
 
 ## 贡献

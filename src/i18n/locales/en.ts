@@ -52,4 +52,10 @@ export const en = {
   keyboard_fade_out_hint: "How long keys stay after release (ms)",
   keyboard_width: "Display Width",
   keyboard_width_hint: "Width of the keyboard display window (px)",
+  keyboard_scale: "Key Size",
+  keyboard_style: "Key Style",
+  keyboard_style_dark: "Dark",
+  keyboard_style_light: "Light",
+  keyboard_style_glass: "Glass",
+  keyboard_style_outline: "Outline",
 };

@@ -52,4 +52,10 @@ export const zhCN = {
   keyboard_fade_out_hint: "按键松开后停留时间（毫秒）",
   keyboard_width: "展示宽度",
   keyboard_width_hint: "按键展示窗口的宽度（像素）",
+  keyboard_scale: "按键大小",
+  keyboard_style: "按键样式",
+  keyboard_style_dark: "暗色",
+  keyboard_style_light: "亮色",
+  keyboard_style_glass: "玻璃",
+  keyboard_style_outline: "描边",
 };

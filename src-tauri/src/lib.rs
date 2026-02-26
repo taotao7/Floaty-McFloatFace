@@ -65,6 +65,8 @@ pub struct AppSettings {
     pub keyboard_display_fade_out: u64,
     #[serde(default = "default_keyboard_width")]
     pub keyboard_display_width: f64,
+    #[serde(default = "default_keyboard_style")]
+    pub keyboard_display_style: String,
 }
 
 fn default_keyboard_position() -> String {
@@ -81,6 +83,10 @@ fn default_keyboard_fade_out() -> u64 {
 
 fn default_keyboard_width() -> f64 {
     800.0
+}
+
+fn default_keyboard_style() -> String {
+    "dark".to_string()
 }
 
 fn default_beauty_smoothness() -> f64 {
@@ -115,6 +121,7 @@ impl Default for AppSettings {
             keyboard_display_scale: 1.0,
             keyboard_display_fade_out: 2000,
             keyboard_display_width: 800.0,
+            keyboard_display_style: "dark".to_string(),
         }
     }
 }
@@ -296,19 +303,31 @@ fn start_drag_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_camera_privacy_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
+            .spawn();
+    }
+}
+
+#[tauri::command]
 fn toggle_keyboard_window(app: AppHandle, enabled: bool) -> Result<(), String> {
     if enabled {
         // Create keyboard window if not exists
         if app.get_webview_window(KEYBOARD_WINDOW_LABEL).is_none() {
             let settings = read_settings_from_store(&app).unwrap_or_default();
             let width = settings.keyboard_display_width.clamp(400.0, 1400.0);
+            let scale = settings.keyboard_display_scale.clamp(0.5, 2.0);
+            let height = (80.0 * scale).round();
             let builder = WebviewWindowBuilder::new(
                 &app,
                 KEYBOARD_WINDOW_LABEL,
                 WebviewUrl::App("keyboard.html".into()),
             )
             .title("Keyboard Display")
-            .inner_size(width, 80.0)
+            .inner_size(width, height)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -574,7 +593,8 @@ pub fn run() {
             toggle_main_window_visibility,
             open_settings_window,
             start_drag_main_window,
-            toggle_keyboard_window
+            toggle_keyboard_window,
+            open_camera_privacy_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -39,19 +39,37 @@ export async function startAdaptiveStream(
   }
 
   let lastError: unknown;
+  const deviceConstraint = cameraId ? { deviceId: { exact: cameraId } } : {};
 
+  // 1) Try each quality tier with the requested device
   for (const tier of QUALITY_TIERS) {
     try {
       return await mediaDevices.getUserMedia({
-        video: {
-          ...tier,
-          ...(cameraId ? { deviceId: { exact: cameraId } } : {}),
-        },
+        video: { ...tier, ...deviceConstraint },
         audio: false,
       });
     } catch (error) {
       lastError = error;
     }
+  }
+
+  // 2) Fallback: no resolution constraints, just the device
+  if (cameraId) {
+    try {
+      return await mediaDevices.getUserMedia({
+        video: { deviceId: { exact: cameraId } },
+        audio: false,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  // 3) Last resort: { video: true } — any device, any resolution
+  try {
+    return await mediaDevices.getUserMedia({ video: true, audio: false });
+  } catch (error) {
+    lastError = error;
   }
 
   if (retries < 3) {

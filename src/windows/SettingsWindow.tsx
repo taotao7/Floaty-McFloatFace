@@ -18,7 +18,7 @@ import {
   setClickThrough,
   toggleKeyboardWindow,
 } from "../lib/tauri";
-import { defaultSettings, type AppSettings, type CameraDevice, type ShapePreset } from "../types/app";
+import { defaultSettings, type AppSettings, type CameraDevice, type KeyboardDisplayStyle, type ShapePreset } from "../types/app";
 import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
 
 function SettingsContent() {
@@ -50,6 +50,15 @@ function SettingsContent() {
       const [nextSettings, cameraList] = await Promise.all([getAppSettings(), listBrowserCameras()]);
       setSettings(nextSettings);
       setDevices(cameraList);
+
+      // If no camera explicitly selected but devices are available,
+      // default to the first device so the selector matches the main window
+      if (!nextSettings.selectedCameraId && cameraList.length > 0) {
+        const firstId = cameraList.find((d) => d.deviceId)?.deviceId;
+        if (firstId) {
+          setSettings((prev) => ({ ...prev, selectedCameraId: firstId }));
+        }
+      }
     };
 
     void load();
@@ -349,6 +358,36 @@ function SettingsContent() {
                 }}
               />
               <p className="hint">{t.current_prefix} {settings.keyboardDisplayWidth}px</p>
+            </div>
+
+            <div className="space-y-2" style={{ padding: "10px 0" }}>
+              <Label>{t.keyboard_scale}</Label>
+              <Slider
+                value={[settings.keyboardDisplayScale]}
+                min={0.5}
+                max={2}
+                step={0.1}
+                onValueChange={(value) => {
+                  void commit({ ...settings, keyboardDisplayScale: Number(value[0].toFixed(1)) });
+                }}
+              />
+              <p className="hint">{t.current_prefix} {settings.keyboardDisplayScale.toFixed(1)}x</p>
+            </div>
+
+            <div className="space-y-2" style={{ padding: "10px 0" }}>
+              <Label>{t.keyboard_style}</Label>
+              <div className="shape-grid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+                {(["dark", "light", "glass", "outline"] as KeyboardDisplayStyle[]).map((style) => (
+                  <button
+                    key={style}
+                    type="button"
+                    className={`shape-card ${settings.keyboardDisplayStyle === style ? "active" : ""}`}
+                    onClick={() => void commit({ ...settings, keyboardDisplayStyle: style })}
+                  >
+                    <strong>{t[`keyboard_style_${style}` as keyof typeof t]}</strong>
+                  </button>
+                ))}
+              </div>
             </div>
           </>
         )}

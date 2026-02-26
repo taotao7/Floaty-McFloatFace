@@ -226,13 +226,28 @@ fn modifier_keycode_to_flag(keycode: i64) -> Option<u64> {
     }
 }
 
+const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
+
+struct TapContext {
+    app: Arc<AppHandle>,
+    tap: CFMachPortRef,
+}
+
 extern "C" fn tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
     event: CGEventRef,
     user_info: *mut c_void,
 ) -> CGEventRef {
-    let app = unsafe { &*(user_info as *const AppHandle) };
+    let ctx = unsafe { &*(user_info as *const TapContext) };
+
+    // Re-enable tap if macOS disabled it (timeout or user input)
+    if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || event_type == 0xFFFFFFFF {
+        unsafe { CGEventTapEnable(ctx.tap, true); }
+        return event;
+    }
+
+    let app = &ctx.app;
     let keycode = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
 
     let key_str_owned: String;
@@ -284,39 +299,80 @@ extern "C" fn tap_callback(
 }
 
 pub fn start_keyboard_listener(app: AppHandle) {
-    // Check and prompt for accessibility permission on the main thread
-    if !ensure_accessibility_permission() {
-        eprintln!("Accessibility permission not granted — keyboard display will not work until permission is granted and app is restarted.");
+    let trusted = ensure_accessibility_permission();
+    if !trusted {
+        let _ = app.emit("app://accessibility-status", serde_json::json!({ "granted": false }));
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if ensure_accessibility_permission() {
+                    let _ = app_clone.emit("app://accessibility-status", serde_json::json!({ "granted": true }));
+                    start_event_tap(app_clone);
+                    return;
+                }
+            }
+        });
         return;
     }
 
+    let _ = app.emit("app://accessibility-status", serde_json::json!({ "granted": true }));
+    start_event_tap(app);
+}
+
+fn start_event_tap(app: AppHandle) {
     let app = Arc::new(app);
 
     std::thread::spawn(move || {
         let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN) | (1 << K_CG_EVENT_KEY_UP) | (1 << K_CG_EVENT_FLAGS_CHANGED);
-        let user_info = Arc::into_raw(app) as *mut c_void;
 
-        unsafe {
-            let tap = CGEventTapCreate(
-                K_CG_SESSION_EVENT_TAP,
-                K_CG_HEAD_INSERT_EVENT_TAP,
-                K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
-                event_mask,
-                tap_callback,
-                user_info,
-            );
+        // Retry loop: CGEventTapCreate can fail if Input Monitoring permission
+        // hasn't been granted yet (separate from Accessibility on macOS 10.15+).
+        // When launched from Finder the app itself needs the permission, unlike
+        // running from Terminal where the terminal's permissions are inherited.
+        const MAX_RETRIES: u32 = 30; // ~60 seconds total
 
-            if tap.is_null() {
-                eprintln!("Failed to create event tap — check Accessibility permissions.");
-                let _ = Arc::from_raw(user_info as *const AppHandle);
+        for attempt in 0..=MAX_RETRIES {
+            unsafe {
+                let ctx = Box::new(TapContext {
+                    app: Arc::clone(&app),
+                    tap: std::ptr::null_mut(),
+                });
+                let ctx_ptr = Box::into_raw(ctx);
+
+                let tap = CGEventTapCreate(
+                    K_CG_SESSION_EVENT_TAP,
+                    K_CG_HEAD_INSERT_EVENT_TAP,
+                    K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                    event_mask,
+                    tap_callback,
+                    ctx_ptr as *mut c_void,
+                );
+
+                if tap.is_null() {
+                    let _ = Box::from_raw(ctx_ptr);
+                    if attempt == MAX_RETRIES {
+                        eprintln!("[keyboard] Failed to create event tap after {} retries.", MAX_RETRIES);
+                        let _ = app.emit("app://event-tap-status", serde_json::json!({ "active": false }));
+                        return;
+                    }
+                    eprintln!("[keyboard] Event tap failed (attempt {}/{}), retrying...", attempt + 1, MAX_RETRIES);
+                    let _ = app.emit("app://event-tap-status", serde_json::json!({ "active": false }));
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    continue;
+                }
+
+                // Success — wire up and run
+                (*ctx_ptr).tap = tap;
+                let _ = app.emit("app://event-tap-status", serde_json::json!({ "active": true }));
+
+                let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+                let run_loop = CFRunLoopGetCurrent();
+                CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, true);
+                CFRunLoopRun();
                 return;
             }
-
-            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
-            let run_loop = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, true);
-            CFRunLoopRun();
         }
     });
 }
