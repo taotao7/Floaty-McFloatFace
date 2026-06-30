@@ -4,10 +4,27 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, Size, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_store::StoreExt;
 
-fn win_or_primary_monitor(app: &AppHandle) -> Result<tauri::Monitor, String> {
-    app.primary_monitor()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "No primary monitor".to_string())
+/// Check whether a point (top-left of a window of the given size) lands on any
+/// currently connected monitor. Prevents restoring a position that was saved
+/// under a different display layout (e.g. an external monitor was unplugged)
+/// from placing the window off-screen, where it would be invisible.
+fn is_position_on_screen(app: &AppHandle, x: f64, y: f64, width: f64, height: f64) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return true; // be permissive if we can't enumerate
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+    monitors.iter().any(|monitor| {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let mon_min_x = pos.x as f64;
+        let mon_min_y = pos.y as f64;
+        let mon_max_x = mon_min_x + size.width as f64;
+        let mon_max_y = mon_min_y + size.height as f64;
+        // Require at least a small portion of the window to overlap the monitor.
+        x < mon_max_x && (x + width) > mon_min_x && y < mon_max_y && (y + height) > mon_min_y
+    })
 }
 
 mod keyboard;
@@ -338,17 +355,7 @@ fn toggle_keyboard_window(app: AppHandle, enabled: bool) -> Result<(), String> {
             let has_saved_position = if let Ok(store) = app.store(STORE_FILE) {
                 if let Some(pos) = store.get(KEYBOARD_POSITION_KEY) {
                     if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_f64()), pos.get("y").and_then(|v| v.as_f64())) {
-                        // Validate position is on screen
-                        let on_screen = if let Ok(monitor) = win_or_primary_monitor(&app) {
-                            let mon_pos = monitor.position();
-                            let mon_size = monitor.size();
-                            let max_x = mon_pos.x as f64 + mon_size.width as f64 - 100.0;
-                            let max_y = mon_pos.y as f64 + mon_size.height as f64 - 40.0;
-                            x >= mon_pos.x as f64 && x <= max_x && y >= mon_pos.y as f64 && y <= max_y
-                        } else {
-                            true
-                        };
-                        on_screen
+                        is_position_on_screen(&app, x, y, width, height)
                     } else {
                         false
                     }
@@ -520,12 +527,23 @@ fn setup_windows(app: &App) -> Result<(), String> {
     apply_window_behavior(&app.handle(), &settings)?;
     apply_main_window_size(&app.handle(), &settings)?;
 
-    // Restore main window position
+    // Restore main window position (only if it still lands on a connected screen)
     if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let store = app.handle().store(STORE_FILE).map_err(|e| e.to_string())?;
+        let handle = app.handle();
+        let store = handle.store(STORE_FILE).map_err(|e| e.to_string())?;
         if let Some(pos) = store.get(POSITION_KEY) {
             if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_f64()), pos.get("y").and_then(|v| v.as_f64())) {
-                let _ = main.set_position(PhysicalPosition::new(x as i32, y as i32));
+                // Use current window size to test overlap; fall back to a small
+                // size if it can't be read so we still validate the origin point.
+                let (w, h) = main
+                    .outer_size()
+                    .map(|s| (s.width as f64, s.height as f64))
+                    .unwrap_or((100.0, 100.0));
+                if is_position_on_screen(handle, x, y, w, h) {
+                    let _ = main.set_position(PhysicalPosition::new(x as i32, y as i32));
+                }
+                // If off-screen, skip restore so the window keeps its declared
+                // default position from tauri.conf.json.
             }
         }
 
