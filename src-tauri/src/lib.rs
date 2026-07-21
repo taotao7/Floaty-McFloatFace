@@ -1,8 +1,21 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, Size, WebviewUrl, WebviewWindowBuilder};
+use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, Size, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_store::StoreExt;
+
+mod events;
+mod recording;
+use events::evt;
+
+/// Application-wide state. Currently holds the single source of truth for
+/// "is recording active", queryable from any window via `get_recording_state`.
+/// Registered with `.manage()` — this is the only managed state in the app.
+#[derive(Default)]
+pub struct AppState {
+    pub recording_active: AtomicBool,
+}
 
 /// Check whether a point (top-left of a window of the given size) lands on any
 /// currently connected monitor. Prevents restoring a position that was saved
@@ -33,9 +46,14 @@ const STORE_FILE: &str = "settings.json";
 const SETTINGS_KEY: &str = "app_settings";
 const POSITION_KEY: &str = "window_position";
 const KEYBOARD_POSITION_KEY: &str = "keyboard_position";
+const RECORDING_POSITION_KEY: &str = "recording_position";
+const RECORDING_REGION_KEY: &str = "recording_region";
 const MAIN_WINDOW_LABEL: &str = "main";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
 const KEYBOARD_WINDOW_LABEL: &str = "keyboard";
+const RECORDING_WINDOW_LABEL: &str = "recording";
+const REGION_WINDOW_LABEL: &str = "region-select";
+const CURSOR_WINDOW_LABEL: &str = "cursor-overlay";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +61,19 @@ pub struct CameraDevice {
     pub device_id: String,
     pub label: String,
     pub group_id: Option<String>,
+}
+
+/// Recording region in physical screen pixels. Same coordinate space as the
+/// mouse coordinates emitted by the event tap. Stored separately from
+/// AppSettings so it can be read/written without rewriting the whole settings
+/// blob during region selection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +115,47 @@ pub struct AppSettings {
     pub keyboard_display_width: f64,
     #[serde(default = "default_keyboard_style")]
     pub keyboard_display_style: String,
+    // --- Screen recording ---
+    #[serde(default = "default_recording_enabled")]
+    pub recording_enabled: bool,
+    #[serde(default = "default_recording_fps")]
+    pub recording_fps: u32,
+    #[serde(default = "default_recording_cursor_overlay")]
+    pub recording_cursor_overlay: bool,
+    #[serde(default)]
+    pub recording_auto_zoom: bool,
+    #[serde(default = "default_recording_zoom_factor")]
+    pub recording_zoom_factor: f64,
+    #[serde(default = "default_cursor_effect_style")]
+    pub cursor_effect_style: String,
+    #[serde(default = "default_cursor_trail_enabled")]
+    pub cursor_trail_enabled: bool,
+    #[serde(default)]
+    pub recording_output_dir: Option<String>,
+}
+
+fn default_recording_fps() -> u32 {
+    30
+}
+
+fn default_recording_enabled() -> bool {
+    true
+}
+
+fn default_recording_cursor_overlay() -> bool {
+    true
+}
+
+fn default_recording_zoom_factor() -> f64 {
+    2.0
+}
+
+fn default_cursor_effect_style() -> String {
+    "ripple".to_string()
+}
+
+fn default_cursor_trail_enabled() -> bool {
+    true
 }
 
 fn default_keyboard_position() -> String {
@@ -139,6 +211,14 @@ impl Default for AppSettings {
             keyboard_display_fade_out: 2000,
             keyboard_display_width: 800.0,
             keyboard_display_style: "dark".to_string(),
+            recording_enabled: true,
+            recording_fps: 30,
+            recording_cursor_overlay: true,
+            recording_auto_zoom: false,
+            recording_zoom_factor: 2.0,
+            cursor_effect_style: "ripple".to_string(),
+            cursor_trail_enabled: true,
+            recording_output_dir: None,
         }
     }
 }
@@ -153,7 +233,7 @@ fn emit_hotkey(app: &AppHandle, action: &str) {
     let payload = HotkeyTriggeredPayload {
         action: action.to_string(),
     };
-    let _ = app.emit("app://hotkey-triggered", payload);
+    let _ = app.emit(evt::HOTKEY_TRIGGERED, payload);
 }
 
 fn normalized_settings(mut settings: AppSettings) -> AppSettings {
@@ -234,7 +314,7 @@ fn save_app_settings(app: AppHandle, payload: AppSettings) -> Result<(), String>
     apply_main_window_size(&app, &payload)?;
     update_tray_locale(&app, &payload.locale);
 
-    app.emit("app://settings-updated", payload)
+    app.emit(evt::SETTINGS_UPDATED, payload)
         .map_err(|err| err.to_string())?;
 
     Ok(())
@@ -338,64 +418,22 @@ fn toggle_keyboard_window(app: AppHandle, enabled: bool) -> Result<(), String> {
             let width = settings.keyboard_display_width.clamp(400.0, 1400.0);
             let scale = settings.keyboard_display_scale.clamp(0.5, 2.0);
             let height = (80.0 * scale).round();
-            let builder = WebviewWindowBuilder::new(
+            // Width/height are computed here from settings; the factory stays
+            // generic and only knows about raw dimensions.
+            build_overlay_window(
                 &app,
-                KEYBOARD_WINDOW_LABEL,
-                WebviewUrl::App("keyboard.html".into()),
-            )
-            .title("Keyboard Display")
-            .inner_size(width, height)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false);
-
-            // Restore saved position or center (with screen bounds check)
-            let has_saved_position = if let Ok(store) = app.store(STORE_FILE) {
-                if let Some(pos) = store.get(KEYBOARD_POSITION_KEY) {
-                    if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_f64()), pos.get("y").and_then(|v| v.as_f64())) {
-                        is_position_on_screen(&app, x, y, width, height)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            let builder = if !has_saved_position {
-                builder.center()
-            } else {
-                builder
-            };
-
-            let win = builder.build().map_err(|e| e.to_string())?;
-
-            // Restore position using PhysicalPosition (same as main window)
-            if has_saved_position {
-                if let Ok(store) = app.store(STORE_FILE) {
-                    if let Some(pos) = store.get(KEYBOARD_POSITION_KEY) {
-                        if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_f64()), pos.get("y").and_then(|v| v.as_f64())) {
-                            let _ = win.set_position(PhysicalPosition::new(x as i32, y as i32));
-                        }
-                    }
-                }
-            }
-
-            // Save position on move (PhysicalPosition, same as main window)
-            let handle = app.clone();
-            win.on_window_event(move |event| {
-                if let tauri::WindowEvent::Moved(pos) = event {
-                    if let Ok(store) = handle.store(STORE_FILE) {
-                        let val = serde_json::json!({ "x": pos.x, "y": pos.y });
-                        store.set(KEYBOARD_POSITION_KEY, val);
-                        let _ = store.save();
-                    }
-                }
-            });
+                OverlayWindowSpec {
+                    label: KEYBOARD_WINDOW_LABEL,
+                    url: "keyboard.html",
+                    title: "Keyboard Display",
+                    width,
+                    height,
+                    resizable: false,
+                    position_key: Some(KEYBOARD_POSITION_KEY),
+                    anchor_origin: None,
+                    click_through: false,
+                },
+            )?;
         } else if let Some(win) = app.get_webview_window(KEYBOARD_WINDOW_LABEL) {
             win.show().map_err(|e| e.to_string())?;
         }
@@ -408,26 +446,474 @@ fn toggle_keyboard_window(app: AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Screen recording commands
+// ---------------------------------------------------------------------------
+
+/// Spec for [`build_overlay_window`]. Bundles every knob the four overlay
+/// windows (recording / keyboard / region-select / cursor) need, so they
+/// all share one code path instead of hand-rolling ~70 lines of builder
+/// boilerplate each.
+struct OverlayWindowSpec<'a> {
+    label: &'a str,
+    url: &'a str,
+    title: &'a str,
+    width: f64,
+    height: f64,
+    resizable: bool,
+    /// Store key under which the window position is persisted.
+    /// `None` for windows that are always re-anchored (region/cursor full-screen).
+    position_key: Option<&'a str>,
+    /// Pin the window to this screen origin instead of restoring a saved
+    /// position. Used by the full-screen region-select and cursor overlays.
+    anchor_origin: Option<(f64, f64)>,
+    /// Make the window click-through (cursor overlay only).
+    click_through: bool,
+}
+
+/// Build a transparent borderless always-on-top window from a spec. Shared by
+/// the recording control bar, the keyboard window, the region-select
+/// overlay, and the cursor overlay. Restores the saved position when no
+/// anchor is requested and the position still lands on a connected screen.
+fn build_overlay_window(
+    app: &AppHandle,
+    spec: OverlayWindowSpec,
+) -> Result<tauri::WebviewWindow, String> {
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        spec.label,
+        WebviewUrl::App(spec.url.into()),
+    )
+    .title(spec.title)
+    .inner_size(spec.width, spec.height)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(spec.resizable);
+
+    // Full-screen-anchored windows (region-select, cursor overlay) skip the
+    // saved-position restore and center fallback; they pin to (0,0).
+    let pinned = spec.anchor_origin.is_some();
+    if let Some((x, y)) = spec.anchor_origin {
+        builder = builder.position(x, y);
+    }
+
+    // Restore saved position if it still overlaps a connected monitor.
+    let has_saved_position = if !pinned {
+        if let Some(key) = spec.position_key {
+            if let Ok(store) = app.store(STORE_FILE) {
+                if let Some(pos) = store.get(key) {
+                    if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_f64()), pos.get("y").and_then(|v| v.as_f64())) {
+                        is_position_on_screen(app, x, y, spec.width, spec.height)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !pinned && !has_saved_position {
+        builder = builder.center();
+    }
+
+    let win = builder.build().map_err(|e| e.to_string())?;
+
+    if !pinned && has_saved_position {
+        if let Some(key) = spec.position_key {
+            if let Ok(store) = app.store(STORE_FILE) {
+                if let Some(pos) = store.get(key) {
+                    if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_f64()), pos.get("y").and_then(|v| v.as_f64())) {
+                        let _ = win.set_position(PhysicalPosition::new(x as i32, y as i32));
+                    }
+                }
+            }
+        }
+    }
+
+    if spec.click_through {
+        let _ = win.set_ignore_cursor_events(true);
+    }
+
+    // Persist position on move, but only for windows that opt into it.
+    if let Some(key) = spec.position_key {
+        if !pinned {
+            let handle = app.clone();
+            let key = key.to_string();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::Moved(pos) = event {
+                    if let Ok(store) = handle.store(STORE_FILE) {
+                        let val = serde_json::json!({ "x": pos.x, "y": pos.y });
+                        store.set(&key, val);
+                        let _ = store.save();
+                    }
+                }
+            });
+        }
+    }
+
+    Ok(win)
+}
+
+#[tauri::command]
+fn toggle_recording_window(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if enabled {
+        if app.get_webview_window(RECORDING_WINDOW_LABEL).is_none() {
+            // Small floating control bar; size matches the inner layout.
+            build_overlay_window(
+                &app,
+                OverlayWindowSpec {
+                    label: RECORDING_WINDOW_LABEL,
+                    url: "recording.html",
+                    title: "Floaty Recording",
+                    width: 430.0,
+                    height: 52.0,
+                    resizable: false,
+                    position_key: Some(RECORDING_POSITION_KEY),
+                    anchor_origin: None,
+                    click_through: false,
+                },
+            )?;
+        } else if let Some(win) = app.get_webview_window(RECORDING_WINDOW_LABEL) {
+            win.show().map_err(|e| e.to_string())?;
+            let _ = win.set_focus();
+        }
+    } else if let Some(win) = app.get_webview_window(RECORDING_WINDOW_LABEL) {
+        win.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn start_region_select(app: AppHandle) -> Result<(), String> {
+    // Use the primary monitor dimensions to size the region-select overlay.
+    let (w, h) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| (m.size().width as f64, m.size().height as f64))
+        .unwrap_or((1920.0, 1080.0));
+
+    // If the window exists already, reuse and reposition it.
+    if let Some(win) = app.get_webview_window(REGION_WINDOW_LABEL) {
+        win.set_size(Size::Physical(tauri::PhysicalSize::new(w as u32, h as u32)))
+            .map_err(|e| e.to_string())?;
+        win.set_position(PhysicalPosition::new(0, 0))
+            .map_err(|e| e.to_string())?;
+        win.show().map_err(|e| e.to_string())?;
+        let _ = win.set_focus();
+    } else {
+        let win = build_overlay_window(
+            &app,
+            OverlayWindowSpec {
+                label: REGION_WINDOW_LABEL,
+                url: "region.html",
+                title: "Select Recording Region",
+                width: w,
+                height: h,
+                resizable: false,
+                position_key: None,
+                anchor_origin: Some((0.0, 0.0)),
+                click_through: false,
+            },
+        )?;
+        let _ = win.set_focus();
+    }
+
+    let _ = app.emit(evt::REGION_STARTED, ());
+    Ok(())
+}
+
+#[tauri::command]
+fn confirm_region(app: AppHandle, region: RecordingRegion) -> Result<(), String> {
+    let store = app.store(STORE_FILE).map_err(|e| e.to_string())?;
+    let value = serde_json::to_value(region).map_err(|e| e.to_string())?;
+    store.set(RECORDING_REGION_KEY, value);
+    store.save().map_err(|e| e.to_string())?;
+
+    if let Some(win) = app.get_webview_window(REGION_WINDOW_LABEL) {
+        let _ = win.hide();
+    }
+    let _ = app.emit(evt::REGION_SELECTED, region);
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_region_select(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(REGION_WINDOW_LABEL) {
+        let _ = win.hide();
+    }
+    let _ = app.emit(evt::REGION_CANCELED, ());
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_recording_region(app: AppHandle) -> Result<(), String> {
+    if let Ok(store) = app.store(STORE_FILE) {
+        store.delete(RECORDING_REGION_KEY);
+        let _ = store.save();
+    }
+    let _ = app.emit(evt::REGION_SELECTED, serde_json::json!(null));
+    Ok(())
+}
+
+#[tauri::command]
+fn set_cursor_overlay(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if enabled {
+        // Full-screen overlay anchored at the primary monitor origin.
+        let (w, h) = app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| (m.size().width as f64, m.size().height as f64))
+            .unwrap_or((1920.0, 1080.0));
+
+        if app.get_webview_window(CURSOR_WINDOW_LABEL).is_none() {
+            // click_through is applied by the factory itself.
+            let _ = build_overlay_window(
+                &app,
+                OverlayWindowSpec {
+                    label: CURSOR_WINDOW_LABEL,
+                    url: "cursor.html",
+                    title: "Cursor Overlay",
+                    width: w,
+                    height: h,
+                    resizable: false,
+                    position_key: None,
+                    anchor_origin: Some((0.0, 0.0)),
+                    click_through: true,
+                },
+            )?;
+        } else {
+            let win = app.get_webview_window(CURSOR_WINDOW_LABEL).unwrap();
+            let _ = win.set_size(Size::Physical(tauri::PhysicalSize::new(w as u32, h as u32)));
+            let _ = win.set_position(PhysicalPosition::new(0, 0));
+            win.show().map_err(|e| e.to_string())?;
+        }
+        // Enable mouse coordinate emission from the event tap.
+        keyboard::set_mouse_tracking(true);
+    } else {
+        keyboard::set_mouse_tracking(false);
+        if let Some(win) = app.get_webview_window(CURSOR_WINDOW_LABEL) {
+            let _ = win.hide();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mouse_tracking_enabled(enabled: bool) {
+    keyboard::set_mouse_tracking(enabled);
+}
+
+#[tauri::command]
+fn get_recording_region(app: AppHandle) -> Option<RecordingRegion> {
+    let store = app.store(STORE_FILE).ok()?;
+    let value = store.get(RECORDING_REGION_KEY)?;
+    serde_json::from_value(value).ok()
+}
+
+/// Single source of truth for "is recording active". Any window can query it
+/// via `get_recording_state`; the recording pipeline flips it via
+/// `set_recording_state`, which also broadcasts `app://recording-status` so
+/// listeners (tray menu text, settings indicator) stay in sync without each
+/// window tracking the state locally.
+#[tauri::command]
+fn get_recording_state(state: State<AppState>) -> bool {
+    state.recording_active.load(Ordering::SeqCst)
+}
+
+/// Flip the recording-active flag and broadcast the change. Returns the
+/// previous value so callers can detect transitions. Not a `#[tauri::command]`
+/// — it is called from Rust commands that already hold the handle + state.
+#[allow(dead_code)]
+fn set_recording_state(app: &AppHandle, state: &AppState, active: bool) -> bool {
+    let prev = state.recording_active.swap(active, Ordering::SeqCst);
+    if prev != active {
+        let _ = app.emit(evt::RECORDING_STATUS, serde_json::json!({ "active": active }));
+    }
+    prev
+}
+
+#[tauri::command]
+async fn save_recording(app: AppHandle, bytes: Vec<u8>, suggested_name: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    // Resolve the default directory from the user's setting (or the platform
+    // default). Naming policy lives in the store module; fall back to it when
+    // the frontend did not provide a name.
+    let settings = read_settings_from_store(&app).unwrap_or_default();
+    let default_dir = recording::store::resolve_output_dir(settings.recording_output_dir.as_deref());
+
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let name = {
+        let trimmed = suggested_name.trim();
+        if trimmed.is_empty() {
+            recording::store::make_filename("floaty", &recording::store::timestamp_parts(secs))
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    // blocking_save_file must run off the main thread; spawn_blocking ensures
+    // that even though Tauri async commands may otherwise borrow main-thread
+    // time. Returns the chosen path or None if the user cancelled.
+    let chosen = tauri::async_runtime::spawn_blocking(move || -> Result<Option<std::path::PathBuf>, String> {
+        let mut builder = app
+            .dialog()
+            .file()
+            .add_filter("Video", &["mp4", "webm"])
+            .set_file_name(&name);
+        if let Some(dir) = default_dir.as_deref() {
+            builder = builder.set_directory(dir);
+        }
+        let path = builder.blocking_save_file();
+        // into_path() returns Result<PathBuf, _>; flatten.
+        Ok(match path {
+            Some(p) => Some(p.into_path().map_err(|e| e.to_string())?),
+            None => None,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let Some(path) = chosen else {
+        return Ok(None);
+    };
+
+    recording::store::write_recording(&path, &bytes)?;
+    Ok(path.to_str().map(|s| s.to_string()))
+}
+
+// --- Recording editor (post-capture trim/export) ---
+
+const EDITOR_WINDOW_LABEL: &str = "editor";
+const EDITOR_DRAFT_KEY: &str = "editor_draft_path";
+
+/// Directory holding un-edited recordings between capture and export.
+/// Lives in the OS temp dir; drafts older than 24h are pruned on write.
+fn drafts_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("floaty-drafts")
+}
+
+/// Persist a freshly-recorded clip as a draft and remember it as the editor's
+/// current source. Returns the draft path.
+#[tauri::command]
+async fn save_recording_draft(app: AppHandle, bytes: Vec<u8>, ext: String) -> Result<String, String> {
+    let dir = drafts_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Prune stale drafts so abandoned edits don't pile up (recordings are big).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.modified().map(|m| m < cutoff).unwrap_or(false) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    let ext = if ext == "webm" { "webm" } else { "mp4" };
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("draft-{}.{}", millis, ext));
+    recording::store::write_recording(&path, &bytes)?;
+
+    let store = app.store(STORE_FILE).map_err(|e| e.to_string())?;
+    store.set(EDITOR_DRAFT_KEY, serde_json::json!(path.to_str().unwrap_or_default()));
+    let _ = store.save();
+    Ok(path.to_str().unwrap_or_default().to_string())
+}
+
+/// The draft path the editor window should load (set by save_recording_draft).
+#[tauri::command]
+async fn get_editor_draft_path(app: AppHandle) -> Option<String> {
+    let store = app.store(STORE_FILE).ok()?;
+    store.get(EDITOR_DRAFT_KEY)?.as_str().map(|s| s.to_string())
+}
+
+/// Read a draft back for the editor preview. Restricted to the drafts dir so
+/// the editor can't exfiltrate arbitrary files. Returned as raw bytes (Tauri
+/// v2 binary response — avoids JSON-encoding megabytes of video).
+#[tauri::command]
+async fn read_recording_file(path: String) -> Result<tauri::ipc::Response, String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.starts_with(drafts_dir()) {
+        return Err("path is outside the drafts directory".to_string());
+    }
+    let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(data))
+}
+
+/// Delete a draft after a successful export or when the user discards it.
+#[tauri::command]
+async fn delete_recording_draft(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if p.starts_with(drafts_dir()) {
+        let _ = std::fs::remove_file(&p);
+    }
+    Ok(())
+}
+
+/// Open (or replace) the editor window for post-capture trim/export.
+#[tauri::command]
+async fn open_editor_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(EDITOR_WINDOW_LABEL) {
+        // Rebuild so a freshly-saved draft is always loaded from scratch.
+        let _ = win.destroy();
+    }
+    let win = WebviewWindowBuilder::new(
+        &app,
+        EDITOR_WINDOW_LABEL,
+        WebviewUrl::App("editor.html".into()),
+    )
+    .title("Floaty Editor")
+    .inner_size(980.0, 700.0)
+    .min_inner_size(760.0, 560.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    let _ = win.set_focus();
+    Ok(())
+}
+
 fn toggle_lock_state(app: &AppHandle) -> Result<(), String> {
     let mut settings = read_settings_from_store(app)?;
     settings.locked = !settings.locked;
     save_app_settings(app.clone(), settings)
 }
 
-fn tray_text(locale: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str) {
+fn tray_text(locale: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
     match locale {
-        "zh-CN" => ("显示/隐藏摄像头窗", "打开设置", "锁定/解锁拖拽", "显示/隐藏按键", "退出"),
-        _ => ("Show/Hide Camera", "Open Settings", "Lock/Unlock Drag", "Show/Hide Keys", "Quit"),
+        "zh-CN" => ("显示/隐藏摄像头窗", "打开设置", "锁定/解锁拖拽", "显示/隐藏按键", "开始/停止录制", "退出"),
+        _ => ("Show/Hide Camera", "Open Settings", "Lock/Unlock Drag", "Show/Hide Keys", "Start/Stop Recording", "Quit"),
     }
 }
 
 fn build_tray_menu(app: &AppHandle, locale: &str) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let (show_text, settings_text, lock_text, keyboard_text, quit_text) = tray_text(locale);
+    let (show_text, settings_text, lock_text, keyboard_text, recording_text, quit_text) = tray_text(locale);
 
     let show_toggle = MenuItem::new(app, show_text, true, None::<&str>)?;
     let open_settings = MenuItem::new(app, settings_text, true, None::<&str>)?;
     let toggle_lock = MenuItem::new(app, lock_text, true, None::<&str>)?;
     let toggle_keyboard = MenuItem::new(app, keyboard_text, true, None::<&str>)?;
+    let toggle_recording = MenuItem::new(app, recording_text, true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::new(app, quit_text, true, None::<&str>)?;
 
@@ -435,11 +921,12 @@ fn build_tray_menu(app: &AppHandle, locale: &str) -> Result<Menu<tauri::Wry>, Bo
     let settings_id = open_settings.id().clone();
     let lock_id = toggle_lock.id().clone();
     let keyboard_id = toggle_keyboard.id().clone();
+    let recording_id = toggle_recording.id().clone();
     let quit_id = quit.id().clone();
 
     let menu = Menu::with_items(
         app,
-        &[&show_toggle, &open_settings, &toggle_lock, &toggle_keyboard, &separator, &quit],
+        &[&show_toggle, &open_settings, &toggle_lock, &toggle_keyboard, &toggle_recording, &separator, &quit],
     )?;
 
     // Store item IDs in app state for event matching
@@ -449,6 +936,7 @@ fn build_tray_menu(app: &AppHandle, locale: &str) -> Result<Menu<tauri::Wry>, Bo
             "open_settings": settings_id.as_ref(),
             "toggle_lock": lock_id.as_ref(),
             "toggle_keyboard": keyboard_id.as_ref(),
+            "toggle_recording": recording_id.as_ref(),
             "quit": quit_id.as_ref(),
         });
         store.set("_tray_menu_ids", ids);
@@ -468,6 +956,7 @@ fn resolve_tray_action(app: &AppHandle, event_id: &str) -> Option<&'static str> 
                 "open_settings" => Some("open_settings"),
                 "toggle_lock" => Some("toggle_lock"),
                 "toggle_keyboard" => Some("toggle_keyboard"),
+                "toggle_recording" => Some("toggle_recording"),
                 "quit" => Some("quit"),
                 _ => None,
             };
@@ -511,6 +1000,22 @@ fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
                     let enabled = settings.keyboard_display_enabled;
                     let _ = toggle_keyboard_window(app.clone(), enabled);
                     let _ = save_app_settings(app.clone(), settings);
+                }
+                Some("toggle_recording") => {
+                    // The recording control bar must be visible to act on the
+                    // hotkey action; ensure it's open, then fire the toggle.
+                    let mut settings = read_settings_from_store(app).unwrap_or_default();
+                    if !settings.recording_enabled {
+                        settings.recording_enabled = true;
+                        let _ = toggle_recording_window(app.clone(), true);
+                        let _ = save_app_settings(app.clone(), settings);
+                    }
+                    // State query is informational here; the frontend owns the
+                    // start/stop decision via the hotkey-triggered event.
+                    if let Some(state) = app.try_state::<AppState>() {
+                        let _was = state.recording_active.load(Ordering::SeqCst);
+                    }
+                    emit_hotkey(app, "toggle_recording");
                 }
                 Some("quit") => app.exit(0),
                 _ => {}
@@ -579,6 +1084,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::default())
         .setup(|app| {
             setup_windows(app).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
             setup_tray(app)?;
@@ -589,6 +1096,17 @@ pub fn run() {
             // Auto-open keyboard window on startup
             if let Err(e) = toggle_keyboard_window(app.handle().clone(), true) {
                 eprintln!("Failed to open keyboard window: {}", e);
+            }
+
+            // Restore the recording control bar on startup when enabled —
+            // otherwise it only ever appears after a tray/hotkey toggle.
+            let recording_enabled = read_settings_from_store(&app.handle())
+                .map(|s| s.recording_enabled)
+                .unwrap_or(false);
+            if recording_enabled {
+                if let Err(e) = toggle_recording_window(app.handle().clone(), true) {
+                    eprintln!("Failed to open recording window: {}", e);
+                }
             }
 
             #[cfg(debug_assertions)]
@@ -612,7 +1130,24 @@ pub fn run() {
             open_settings_window,
             start_drag_main_window,
             toggle_keyboard_window,
-            open_camera_privacy_settings
+            open_camera_privacy_settings,
+            // Screen recording
+            toggle_recording_window,
+            start_region_select,
+            confirm_region,
+            cancel_region_select,
+            reset_recording_region,
+            set_cursor_overlay,
+            set_mouse_tracking_enabled,
+            get_recording_region,
+            get_recording_state,
+            save_recording,
+            // Recording editor
+            save_recording_draft,
+            get_editor_draft_path,
+            read_recording_file,
+            delete_recording_draft,
+            open_editor_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,7 @@
 import { emit, listen } from "@tauri-apps/api/event";
+import { EVT } from "../lib/events";
 import { gsap } from "gsap";
-import { Camera, Lock, Palette, Pin, Sparkles } from "lucide-react";
+import { Camera, Lock, Palette, Pin, Sparkles, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
@@ -12,13 +13,18 @@ import { listBrowserCameras } from "../lib/camera";
 import {
   applyWindowShape,
   getAppSettings,
+  getRecordingRegion,
   openSettingsWindow,
+  pickRecordingOutputDir,
+  resetRecordingRegion,
   saveAppSettings,
   setAlwaysOnTop,
   setClickThrough,
+  startRegionSelect,
   toggleKeyboardWindow,
+  toggleRecordingWindow,
 } from "../lib/tauri";
-import { defaultSettings, type AppSettings, type CameraDevice, type KeyboardDisplayStyle, type ShapePreset } from "../types/app";
+import { defaultSettings, type AppSettings, type CameraDevice, type CursorEffectStyle, type KeyboardDisplayStyle, type RecordingRegion, type ShapePreset } from "../types/app";
 import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
 
 function SettingsContent() {
@@ -26,6 +32,7 @@ function SettingsContent() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [saving, setSaving] = useState(false);
+  const [region, setRegion] = useState<RecordingRegion | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const shapeOptions: Array<{ value: ShapePreset; label: string; desc: string }> = useMemo(() => [
@@ -43,13 +50,18 @@ function SettingsContent() {
         const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
         tempStream.getTracks().forEach((track) => track.stop());
         // Notify main window to re-acquire camera after we released the temp stream
-        await emit("app://camera-reacquire");
+        await emit(EVT.CAMERA_REACQUIRE);
       } catch {
         // Permission denied — still try to enumerate
       }
-      const [nextSettings, cameraList] = await Promise.all([getAppSettings(), listBrowserCameras()]);
+      const [nextSettings, cameraList, savedRegion] = await Promise.all([
+        getAppSettings(),
+        listBrowserCameras(),
+        getRecordingRegion(),
+      ]);
       setSettings(nextSettings);
       setDevices(cameraList);
+      setRegion(savedRegion);
 
       // If no camera explicitly selected but devices are available,
       // default to the first device so the selector matches the main window
@@ -65,10 +77,21 @@ function SettingsContent() {
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = listen<AppSettings>("app://settings-updated", (event) => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
       setSettings(event.payload);
     });
 
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  // Live-update the displayed region when the region-select window confirms
+  // or the user resets to full screen.
+  useEffect(() => {
+    const unlistenPromise = listen<RecordingRegion | null>(EVT.REGION_SELECTED, (event) => {
+      setRegion(event.payload);
+    });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
@@ -393,6 +416,179 @@ function SettingsContent() {
         )}
       </Card>
 
+      <Card className="settings-section">
+        <div className="section-title">
+          <Video size={16} />
+          <h2>{t.recording}</h2>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <Label>{t.recording_show}</Label>
+            <p className="hint">{t.recording_show_hint}</p>
+          </div>
+          <Switch
+            checked={settings.recordingEnabled}
+            onCheckedChange={async (checked) => {
+              await toggleRecordingWindow(checked);
+              void commit({ ...settings, recordingEnabled: checked });
+            }}
+          />
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <Label>{t.recording_region}</Label>
+            <p className="hint">
+              {t.recording_region_current}:{" "}
+              {region
+                ? `${Math.round(region.width / (window.devicePixelRatio || 1))} × ${Math.round(region.height / (window.devicePixelRatio || 1))}`
+                : t.recording_region_full}
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <Button
+              variant="secondary"
+              onClick={() => void startRegionSelect()}
+              style={{ height: 28, fontSize: 12, padding: "0 10px" }}
+            >
+              {t.recording_region_pick}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                await resetRecordingRegion();
+                setRegion(null);
+              }}
+              style={{ height: 28, fontSize: 12, padding: "0 10px" }}
+            >
+              {t.recording_region_reset}
+            </Button>
+          </div>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <Label>{t.recording_output_dir}</Label>
+            <p className="hint" style={{ wordBreak: "break-all" }}>
+              {settings.recordingOutputDir || t.recording_output_default}
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                const dir = await pickRecordingOutputDir();
+                if (dir) {
+                  void commit({ ...settings, recordingOutputDir: dir });
+                }
+              }}
+              style={{ height: 28, fontSize: 12, padding: "0 10px" }}
+            >
+              {t.recording_output_dir_pick}
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={!settings.recordingOutputDir}
+              onClick={() => {
+                void commit({ ...settings, recordingOutputDir: undefined });
+              }}
+              style={{ height: 28, fontSize: 12, padding: "0 10px" }}
+            >
+              {t.recording_output_dir_reset}
+            </Button>
+          </div>
+        </div>
+
+        <div className="space-y-2" style={{ padding: "10px 0" }}>
+          <Label>{t.recording_fps}</Label>
+          <Slider
+            value={[settings.recordingFps]}
+            min={15}
+            max={60}
+            step={5}
+            onValueChange={(value) => {
+              void commit({ ...settings, recordingFps: value[0] });
+            }}
+          />
+          <p className="hint">{t.current_prefix} {settings.recordingFps} fps</p>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <Label>{t.recording_auto_zoom}</Label>
+            <p className="hint">{t.recording_auto_zoom_hint}</p>
+          </div>
+          <Switch
+            checked={settings.recordingAutoZoom}
+            onCheckedChange={(checked) => {
+              void commit({ ...settings, recordingAutoZoom: checked });
+            }}
+          />
+        </div>
+
+        {settings.recordingAutoZoom && (
+          <div className="space-y-2" style={{ padding: "10px 0" }}>
+            <Label>{t.recording_zoom_factor}</Label>
+            <Slider
+              value={[settings.recordingZoomFactor]}
+              min={1.5}
+              max={4}
+              step={0.5}
+              onValueChange={(value) => {
+                void commit({ ...settings, recordingZoomFactor: value[0] });
+              }}
+            />
+            <p className="hint">{t.current_prefix} {settings.recordingZoomFactor}×</p>
+          </div>
+        )}
+
+        <div className="setting-row">
+          <div>
+            <Label>{t.cursor_overlay}</Label>
+            <p className="hint">{t.cursor_overlay_hint}</p>
+          </div>
+          <Switch
+            checked={settings.recordingCursorOverlay}
+            onCheckedChange={(checked) => {
+              void commit({ ...settings, recordingCursorOverlay: checked });
+            }}
+          />
+        </div>
+
+        {settings.recordingCursorOverlay && (
+          <>
+            <div className="setting-row">
+              <div>
+                <Label>{t.cursor_trail}</Label>
+              </div>
+              <Switch
+                checked={settings.cursorTrailEnabled}
+                onCheckedChange={(checked) => {
+                  void commit({ ...settings, cursorTrailEnabled: checked });
+                }}
+              />
+            </div>
+
+            <div className="space-y-2" style={{ padding: "10px 0" }}>
+              <Label>{t.cursor_style}</Label>
+              <div className="shape-grid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+                {(["ripple", "ring", "spark", "none"] as CursorEffectStyle[]).map((style) => (
+                  <button
+                    key={style}
+                    type="button"
+                    className={`shape-card ${settings.cursorEffectStyle === style ? "active" : ""}`}
+                    onClick={() => void commit({ ...settings, cursorEffectStyle: style })}
+                  >
+                    <strong>{t[`cursor_style_${style}` as keyof typeof t]}</strong>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </Card>
+
       <Card className="settings-section hotkey-card">
         <div className="section-title">
           <Sparkles size={16} />
@@ -401,6 +597,7 @@ function SettingsContent() {
         <p><kbd>Cmd/Ctrl + Shift + V</kbd> {t.hotkey_toggle_visibility}</p>
         <p><kbd>Cmd/Ctrl + Shift + L</kbd> {t.hotkey_toggle_lock}</p>
         <p><kbd>Cmd/Ctrl + Shift + ,</kbd> {t.hotkey_open_settings}</p>
+        <p><kbd>Cmd/Ctrl + Shift + R</kbd> {t.hotkey_toggle_recording}</p>
       </Card>
 
       <footer className="settings-footer settings-section">
@@ -428,7 +625,7 @@ export function SettingsWindow() {
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = listen<AppSettings>("app://settings-updated", (event) => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
       if (event.payload.locale) {
         setLocale(event.payload.locale as Locale);
       }

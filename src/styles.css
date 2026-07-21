@@ -397,3 +397,324 @@ kbd {
 html, body, #root {
   background: transparent !important;
 }
+
+/* ========================================================================== */
+/* Screen recording — floating control bar                                      */
+/* ========================================================================== */
+
+.recording-bar {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  background: rgba(20, 20, 24, 0.82);
+  backdrop-filter: blur(16px) saturate(1.6);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f5f5f7;
+  font-size: 12px;
+  user-select: none;
+  cursor: grab;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+.recording-bar.dragging { cursor: grabbing; opacity: 0.92; }
+
+.rec-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #6b7280;
+  flex-shrink: 0;
+}
+.rec-dot.recording {
+  background: #ff4d4f;
+  box-shadow: 0 0 8px rgba(255, 77, 79, 0.8);
+  animation: recPulse 1.4s ease-in-out infinite;
+}
+.rec-dot.paused { background: #f5a623; }
+.rec-dot.saving { background: #4f9bff; }
+@keyframes recPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+
+.rec-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5f5f7;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.rec-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+.rec-btn:active:not(:disabled) { transform: scale(0.94); }
+.rec-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.rec-btn.primary { background: rgba(255, 77, 79, 0.22); border-color: rgba(255, 77, 79, 0.5); color: #ff6b6d; }
+.rec-btn.primary:hover:not(:disabled) { background: rgba(255, 77, 79, 0.34); }
+.rec-btn-start { width: auto; padding: 0 10px; gap: 5px; }
+.rec-label { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; }
+
+/* Big 3-2-1 number overlaid on the bar before capture starts. */
+.rec-countdown {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  background: rgba(16, 18, 24, 0.88);
+  pointer-events: none;
+  z-index: 5;
+}
+.rec-countdown span {
+  font-size: 26px;
+  font-weight: 800;
+  color: #ff6b6d;
+  font-variant-numeric: tabular-nums;
+  animation: recCountdownPop 0.9s ease-out;
+}
+@keyframes recCountdownPop {
+  0% { transform: scale(1.6); opacity: 0; }
+  25% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(0.9); opacity: 0.85; }
+}
+.rec-dot.countdown { background: #f5a623; animation: recPulse 1s ease-in-out infinite; }
+
+.rec-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  min-width: 38px;
+}
+.rec-region { color: rgba(245, 245, 247, 0.6); }
+.rec-info {
+  color: rgba(245, 245, 247, 0.7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+/* ========================================================================== */
+/* Region selection overlay                                                     */
+/* ========================================================================== */
+
+.region-select {
+  position: fixed;
+  inset: 0;
+  cursor: crosshair;
+  user-select: none;
+}
+.region-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 14px;
+  pointer-events: none;
+}
+.region-rect {
+  position: absolute;
+  border: 2px solid #4f9bff;
+  border-radius: 4px;
+  cursor: move;
+  /* Dims everything outside the selection. Cheaper than a full-screen SVG
+     mask, which forced a full-window repaint on every pointer move. */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+}
+.region-size-label {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.region-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border: 2px solid #4f9bff;
+  border-radius: 3px;
+  z-index: 2;
+}
+.region-toolbar {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.78);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+.region-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.region-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.region-btn.primary { background: #4f9bff; border-color: #4f9bff; }
+
+/* ========================================================================== */
+/* Cursor effects overlay                                                       */
+/* ========================================================================== */
+
+.cursor-overlay { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+.cursor-trail-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.cursor-effect {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  margin-left: -14px;
+  margin-top: -14px;
+  border-radius: 50%;
+  border-style: solid;
+  border-width: 3px;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.cursor-spark { width: 12px; height: 12px; margin-left: -6px; margin-top: -6px; }
+
+
+/* ========================================================================== */
+/* Recording editor (post-capture trim/export)                                */
+/* ========================================================================== */
+
+.editor-root {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #141418;
+  color: #f5f5f7;
+  font-size: 13px;
+  overflow: auto;
+}
+.editor-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.editor-preview video {
+  max-width: 100%;
+  max-height: 100%;
+}
+.editor-loading { color: rgba(245, 245, 247, 0.6); }
+
+.editor-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.editor-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.editor-row > label {
+  width: 56px;
+  flex-shrink: 0;
+  color: rgba(245, 245, 247, 0.75);
+  font-weight: 600;
+}
+.editor-row .relative { flex: 1; }
+.editor-time {
+  flex-shrink: 0;
+  min-width: 130px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: rgba(245, 245, 247, 0.6);
+}
+
+.editor-options { display: flex; gap: 8px; }
+.editor-opt {
+  padding: 5px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5f5f7;
+  font-size: 12px;
+  cursor: pointer;
+}
+.editor-opt:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.editor-opt.active {
+  border-color: #4f9bff;
+  background: rgba(79, 155, 255, 0.22);
+}
+.editor-opt:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.editor-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.editor-progress-fill {
+  height: 100%;
+  background: #4f9bff;
+  transition: width 0.2s ease;
+}
+
+.editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.editor-btn {
+  padding: 7px 18px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5f5f7;
+  font-size: 13px;
+  cursor: pointer;
+}
+.editor-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.editor-btn.primary {
+  background: rgba(255, 77, 79, 0.24);
+  border-color: rgba(255, 77, 79, 0.5);
+  color: #ff8587;
+  font-weight: 700;
+}
+.editor-btn.primary:hover:not(:disabled) { background: rgba(255, 77, 79, 0.36); }
+.editor-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.editor-info {
+  margin: 0;
+  color: rgba(245, 245, 247, 0.65);
+  word-break: break-all;
+}

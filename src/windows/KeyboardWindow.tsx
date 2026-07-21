@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { EVT } from "../lib/events";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
@@ -68,21 +69,21 @@ export default function KeyboardWindow() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ granted: boolean }>("app://accessibility-status", (event) => {
+    const unlisten = listen<{ granted: boolean }>(EVT.ACCESSIBILITY_STATUS, (event) => {
       setAccessibilityGranted(event.payload.granted);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ active: boolean }>("app://event-tap-status", (event) => {
+    const unlisten = listen<{ active: boolean }>(EVT.EVENT_TAP_STATUS, (event) => {
       setEventTapActive(event.payload.active);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<AppSettings>("app://settings-updated", (event) => {
+    const unlisten = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
       fadeOutMsRef.current = event.payload.keyboardDisplayFadeOut || DEFAULT_FADE_OUT_MS;
       const width = event.payload.keyboardDisplayWidth || 800;
       const scale = event.payload.keyboardDisplayScale ?? 1.0;
@@ -98,7 +99,7 @@ export default function KeyboardWindow() {
   }, []);
 
   useEffect(() => {
-    const unlisten1 = listen<KeyEvent>("app://key-pressed", (event) => {
+    const unlisten1 = listen<KeyEvent>(EVT.KEY_PRESSED, (event) => {
       const key = event.payload.key;
       const existing = timersRef.current.get(key);
       if (existing) {
@@ -132,7 +133,7 @@ export default function KeyboardWindow() {
       });
     });
 
-    const unlisten2 = listen<KeyEvent>("app://key-released", (event) => {
+    const unlisten2 = listen<KeyEvent>(EVT.KEY_RELEASED, (event) => {
       const key = event.payload.key;
       const existing = timersRef.current.get(key);
       if (existing) {

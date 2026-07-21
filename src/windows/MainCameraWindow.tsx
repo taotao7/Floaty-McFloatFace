@@ -1,4 +1,5 @@
 import { emit, listen } from "@tauri-apps/api/event";
+import { EVT } from "../lib/events";
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import { Lock, LockOpen, FlipHorizontal2, Settings, Keyboard } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -51,7 +52,7 @@ function MainCameraContent() {
     if (!navigator.mediaDevices) {
       setRuntime((prev) => ({ ...prev, permission: "denied", streamReady: false }));
       setStatus(t.media_devices_unavailable);
-      await emit("app://camera-error", { message: "media_devices_unavailable" });
+      await emit(EVT.CAMERA_ERROR, { message: "media_devices_unavailable" });
       return;
     }
 
@@ -75,7 +76,7 @@ function MainCameraContent() {
       if (isDenied) {
         await openCameraPrivacySettings();
       }
-      await emit("app://camera-error", {
+      await emit(EVT.CAMERA_ERROR, {
         message: error instanceof Error ? error.message : "camera_unavailable",
       });
     }
@@ -128,7 +129,7 @@ function MainCameraContent() {
   }, [connectCamera]);
 
   useEffect(() => {
-    const unlistenPromise = listen<AppSettings>("app://settings-updated", (event) => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
       setSettings(event.payload);
     });
     return () => { void unlistenPromise.then((unlisten) => unlisten()); };
@@ -136,7 +137,7 @@ function MainCameraContent() {
 
   // Re-acquire camera when settings window releases its temp stream
   useEffect(() => {
-    const unlistenPromise = listen("app://camera-reacquire", () => {
+    const unlistenPromise = listen(EVT.CAMERA_REACQUIRE, () => {
       void connectCamera();
     });
     return () => { void unlistenPromise.then((unlisten) => unlisten()); };
@@ -154,10 +155,15 @@ function MainCameraContent() {
         await register("CommandOrControl+Shift+L", async () => {
           const next = { ...settings, locked: !settings.locked };
           await syncSettings(next);
-          await emit("app://hotkey-triggered", { action: "toggle_lock" });
+          await emit(EVT.HOTKEY_TRIGGERED, { action: "toggle_lock" });
         });
         await register("CommandOrControl+Shift+,", async () => {
           await openSettingsWindow();
+        });
+        await register("CommandOrControl+Shift+R", async () => {
+          // The recording control bar listens for this action and toggles
+          // start/stop. If the bar isn't open yet, the action is inert.
+          await emit(EVT.HOTKEY_TRIGGERED, { action: "toggle_recording" });
         });
       } catch { /* hotkey registration may fail if already taken */ }
     };
@@ -302,7 +308,7 @@ export function MainCameraWindow() {
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = listen<AppSettings>("app://settings-updated", (event) => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
       if (event.payload.locale) {
         setLocale(event.payload.locale as Locale);
       }

@@ -1,8 +1,19 @@
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use super::KeyEventPayload;
+
+/// Global gate for mouse event emission. Only emits mouse coordinates while
+/// recording is active, to avoid overhead when the feature is idle. Toggled
+/// via the `set_mouse_tracking_enabled` command.
+pub static MOUSE_TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable mouse tracking at runtime. Called from the recording command.
+pub fn set_mouse_tracking(enabled: bool) {
+    MOUSE_TRACKING_ENABLED.store(enabled, Ordering::SeqCst);
+}
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -151,6 +162,15 @@ const K_CG_EVENT_KEY_UP: u32 = 11;
 const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
 const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
 
+// Mouse event types for CGEventTap. These reuse the SAME tap as the keyboard
+// listener, so they inherit Accessibility + Input Monitoring permissions — no
+// additional permission prompts are needed for the recording cursor feature.
+const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
+const K_CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
+const K_CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
+const K_CG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
+const K_CG_EVENT_RIGHT_MOUSE_UP: u32 = 4;
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapCreate(
@@ -167,6 +187,17 @@ extern "C" {
         actual_len: *mut u64,
         buf: *mut u16,
     );
+    // Returns the mouse location in global display coordinates (points, NOT
+    // physical pixels — on a 2x Retina display these are half the physical
+    // values). Callers must convert before emitting; see tap_callback.
+    fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
 }
 
 // CGEventFlags bitmasks for modifier keys
@@ -247,6 +278,42 @@ extern "C" fn tap_callback(
         return event;
     }
 
+    // Mouse events: only emit while tracking is enabled (recording active).
+    // Reuses the same tap so no extra permission is required.
+    if MOUSE_TRACKING_ENABLED.load(Ordering::SeqCst) {
+        if let Some((event_name, button)) = match event_type {
+            K_CG_EVENT_LEFT_MOUSE_DOWN => Some((crate::events::evt::MOUSE_DOWN, "left")),
+            K_CG_EVENT_LEFT_MOUSE_UP => Some((crate::events::evt::MOUSE_UP, "left")),
+            K_CG_EVENT_RIGHT_MOUSE_DOWN => Some((crate::events::evt::MOUSE_DOWN, "right")),
+            K_CG_EVENT_RIGHT_MOUSE_UP => Some((crate::events::evt::MOUSE_UP, "right")),
+            K_CG_EVENT_MOUSE_MOVED => Some((crate::events::evt::MOUSE_MOVE, "")),
+            _ => None,
+        } {
+            let pt = unsafe { CGEventGetLocation(event) };
+            // CGEventGetLocation reports display coordinates (points). The
+            // recording contract (RecordingRegion, crop math, cursor overlay)
+            // is physical pixels, so convert with the primary monitor's scale
+            // factor — the feature is scoped to the primary monitor anyway.
+            let scale = ctx
+                .app
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| m.scale_factor())
+                .unwrap_or(1.0);
+            let _ = ctx.app.emit(
+                event_name,
+                serde_json::json!({
+                    "x": pt.x * scale,
+                    "y": pt.y * scale,
+                    "button": button,
+                    "timestamp": now_millis(),
+                }),
+            );
+            return event;
+        }
+    }
+
     let app = &ctx.app;
     let keycode = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
 
@@ -270,16 +337,16 @@ extern "C" fn tap_callback(
     };
 
     let event_name = match event_type {
-        K_CG_EVENT_KEY_DOWN => "app://key-pressed",
-        K_CG_EVENT_KEY_UP => "app://key-released",
+        K_CG_EVENT_KEY_DOWN => crate::events::evt::KEY_PRESSED,
+        K_CG_EVENT_KEY_UP => crate::events::evt::KEY_RELEASED,
         K_CG_EVENT_FLAGS_CHANGED => {
             // Determine press/release by checking if the modifier flag is active
             if let Some(flag) = modifier_keycode_to_flag(keycode) {
                 let flags = unsafe { CGEventGetFlags(event) };
                 if flags & flag != 0 {
-                    "app://key-pressed"
+                    crate::events::evt::KEY_PRESSED
                 } else {
-                    "app://key-released"
+                    crate::events::evt::KEY_RELEASED
                 }
             } else {
                 return event;
@@ -301,13 +368,13 @@ extern "C" fn tap_callback(
 pub fn start_keyboard_listener(app: AppHandle) {
     let trusted = ensure_accessibility_permission();
     if !trusted {
-        let _ = app.emit("app://accessibility-status", serde_json::json!({ "granted": false }));
+        let _ = app.emit(crate::events::evt::ACCESSIBILITY_STATUS, serde_json::json!({ "granted": false }));
         let app_clone = app.clone();
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 if ensure_accessibility_permission() {
-                    let _ = app_clone.emit("app://accessibility-status", serde_json::json!({ "granted": true }));
+                    let _ = app_clone.emit(crate::events::evt::ACCESSIBILITY_STATUS, serde_json::json!({ "granted": true }));
                     start_event_tap(app_clone);
                     return;
                 }
@@ -316,7 +383,7 @@ pub fn start_keyboard_listener(app: AppHandle) {
         return;
     }
 
-    let _ = app.emit("app://accessibility-status", serde_json::json!({ "granted": true }));
+    let _ = app.emit(crate::events::evt::ACCESSIBILITY_STATUS, serde_json::json!({ "granted": true }));
     start_event_tap(app);
 }
 
@@ -324,7 +391,16 @@ fn start_event_tap(app: AppHandle) {
     let app = Arc::new(app);
 
     std::thread::spawn(move || {
-        let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN) | (1 << K_CG_EVENT_KEY_UP) | (1 << K_CG_EVENT_FLAGS_CHANGED);
+        let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN)
+            | (1 << K_CG_EVENT_KEY_UP)
+            | (1 << K_CG_EVENT_FLAGS_CHANGED)
+            // Mouse events for the recording cursor overlay. These fire even when
+            // tracking is off; the callback gates emission via MOUSE_TRACKING_ENABLED.
+            | (1 << K_CG_EVENT_MOUSE_MOVED)
+            | (1 << K_CG_EVENT_LEFT_MOUSE_DOWN)
+            | (1 << K_CG_EVENT_LEFT_MOUSE_UP)
+            | (1 << K_CG_EVENT_RIGHT_MOUSE_DOWN)
+            | (1 << K_CG_EVENT_RIGHT_MOUSE_UP);
 
         // Retry loop: CGEventTapCreate can fail if Input Monitoring permission
         // hasn't been granted yet (separate from Accessibility on macOS 10.15+).
@@ -353,18 +429,18 @@ fn start_event_tap(app: AppHandle) {
                     let _ = Box::from_raw(ctx_ptr);
                     if attempt == MAX_RETRIES {
                         eprintln!("[keyboard] Failed to create event tap after {} retries.", MAX_RETRIES);
-                        let _ = app.emit("app://event-tap-status", serde_json::json!({ "active": false }));
+                        let _ = app.emit(crate::events::evt::EVENT_TAP_STATUS, serde_json::json!({ "active": false }));
                         return;
                     }
                     eprintln!("[keyboard] Event tap failed (attempt {}/{}), retrying...", attempt + 1, MAX_RETRIES);
-                    let _ = app.emit("app://event-tap-status", serde_json::json!({ "active": false }));
+                    let _ = app.emit(crate::events::evt::EVENT_TAP_STATUS, serde_json::json!({ "active": false }));
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     continue;
                 }
 
                 // Success — wire up and run
                 (*ctx_ptr).tap = tap;
-                let _ = app.emit("app://event-tap-status", serde_json::json!({ "active": true }));
+                let _ = app.emit(crate::events::evt::EVENT_TAP_STATUS, serde_json::json!({ "active": true }));
 
                 let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
                 let run_loop = CFRunLoopGetCurrent();
