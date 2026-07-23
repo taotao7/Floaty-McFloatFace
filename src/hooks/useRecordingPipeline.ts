@@ -1,31 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { currentMonitor } from "@tauri-apps/api/window";
+import { currentMonitor, primaryMonitor } from "@tauri-apps/api/window";
 import { EVT } from "../lib/events";
-import type { MousePayload } from "../lib/events";
-import { computeCropRect, computeZoomedCrop, smoothCrop, validateCaptureAssumption } from "../lib/coords";
-import type { CropRect } from "../lib/coords";
-import { getAppSettings, getRecordingRegion, openEditorWindow, saveRecordingDraft, setCursorOverlay, setMouseTrackingEnabled } from "../lib/tauri";
-import type { AppSettings, RecordingRegion } from "../types/app";
+import type { MousePayload, RecordingCmdPayload, RecordingUiPayload } from "../lib/events";
+import { computeCropRect } from "../lib/coords";
+import { getAppSettings, getRecordingRegion, openEditorWindow, saveRecordingDraft, saveRecordingMeta, setCursorOverlay, setMouseTrackingEnabled } from "../lib/tauri";
+import type { AppSettings, CursorSample, RecordingMeta, RecordingRegion } from "../types/app";
 
 export type RecordingStatus = "idle" | "countdown" | "recording" | "paused" | "saving";
 
-/** How long after the last cursor activity the auto-zoom stays zoomed in. */
-const ZOOM_HOLD_MS = 1600;
-/** Fraction of the remaining crop distance closed per animation frame. */
-const ZOOM_SMOOTHING = 0.12;
 /** Seconds counted down in the control bar before capture actually starts. */
 const COUNTDOWN_SECONDS = 3;
-
-/** Mutable auto-zoom state for the rAF crop loop (never triggers renders). */
-interface ZoomState {
-  /** Latest cursor position in physical pixels (frame-local, origin 0,0). */
-  cursor: { x: number; y: number } | null;
-  /** Timestamp of the last cursor move/click, for the zoom-out dwell. */
-  lastActivity: number;
-  /** The animated crop currently being drawn. */
-  current: CropRect;
-}
 
 /**
  * Pure helper — pick the best-supported recording mime type. Extracted from
@@ -84,15 +69,19 @@ export interface PipelineApi {
  * `requestAnimationFrame` crop loop, the `MediaRecorder` lifecycle, chunk
  * assembly, save, status broadcasting, and the cursor-overlay toggle.
  *
- * Extracted from `RecordingControlWindow` so the React component is just a
- * thin view over `{ status, elapsed, info, start, stop, togglePause }`. The
- * component previously held 11 refs and 11 concerns; now it holds none of
- * the pipeline internals.
+ * HOSTED IN THE MAIN CAMERA WINDOW, not the recording control bar. WebKit
+ * enforces one active capture per *page* ("latest wins"): when the pipeline
+ * lived in the recording window, its `getDisplayMedia` muted the camera in
+ * the main window (black float), and any camera re-acquire muted the screen
+ * capture right back (black recordings). A single document may hold both
+ * captures simultaneously, so the pipeline runs alongside the camera and the
+ * control bar is a remote control speaking `app://recording-cmd` /
+ * `app://recording-ui` (see `useRecordingRemote`).
  *
  * The pipeline is NOT yet pure enough to unit-test end-to-end (it touches
  * `navigator.mediaDevices`, `MediaRecorder`, and the Tauri backend), but the
- * extracted pure helpers (`pickMimeType`, plus `computeCropRect` /
- * `validateCaptureAssumption` from coords) are independently tested.
+ * extracted pure helpers (`pickMimeType`, plus `computeCropRect` from
+ * coords) are independently tested.
  */
 export function useRecordingPipeline(): PipelineApi {
   const [status, setStatus] = useState<RecordingStatus>("idle");
@@ -109,7 +98,7 @@ export function useRecordingPipeline(): PipelineApi {
   const chunksRef = useRef<Blob[]>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const cropIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const regionRef = useRef<RecordingRegion | null>(null);
   const settingsRef = useRef<AppSettings | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -121,9 +110,23 @@ export function useRecordingPipeline(): PipelineApi {
   // Latest elapsed seconds, read by togglePause() when resuming so it can
   // offset the start time correctly.
   const elapsedRef = useRef<number>(0);
-  // Auto-zoom state + event unlisteners, torn down with the stream.
-  const zoomStateRef = useRef<ZoomState | null>(null);
-  const zoomUnlistenRef = useRef<Array<() => void> | null>(null);
+  // Cursor trajectory for post-capture zoom, recorded whenever a recording is
+  // active. The canvas no longer bakes zoom in; the editor replays this trail.
+  const cursorTrailRef = useRef<CursorSample[]>([]);
+  const cursorUnlistenRef = useRef<Array<() => void> | null>(null);
+  /** performance.now() captured when the MediaRecorder starts; trajectory `t`
+   *  values are milliseconds relative to this anchor. */
+  const recStartPerfRef = useRef<number>(0);
+  /** Captured display-stream resolution + crop, recorded once on start so the
+   *  metadata sidecar can be written on stop without re-reading the stream. */
+  const captureSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  const cropRef = useRef<{ sx: number; sy: number; sw: number; sh: number } | null>(null);
+  /** Content scale (global physical px → frame px), computed arithmetically
+   *  as videoWidth / monitor physical width; recorded in the sidecar so zoom
+   *  replay maps the cursor trail the same way the crop mapped the region. */
+  const contentScaleRef = useRef(1);
+  /** Raw capture-time numbers for the sidecar's debug block. */
+  const captureDebugRef = useRef<Record<string, unknown> | null>(null);
   // Mime type the active MediaRecorder actually negotiated; drives the blob
   // type and file extension on save.
   const mimeRef = useRef<string>("video/mp4");
@@ -173,9 +176,9 @@ export function useRecordingPipeline(): PipelineApi {
   }, []);
 
   const stopCropLoop = useCallback(() => {
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
+    if (cropIntervalRef.current !== null) {
+      clearInterval(cropIntervalRef.current);
+      cropIntervalRef.current = null;
     }
   }, []);
 
@@ -190,9 +193,8 @@ export function useRecordingPipeline(): PipelineApi {
   const cleanupStream = useCallback(() => {
     stopCropLoop();
     cancelCountdown();
-    zoomUnlistenRef.current?.forEach((fn) => fn());
-    zoomUnlistenRef.current = null;
-    zoomStateRef.current = null;
+    cursorUnlistenRef.current?.forEach((fn) => fn());
+    cursorUnlistenRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
   }, [stopCropLoop, cancelCountdown]);
@@ -207,8 +209,22 @@ export function useRecordingPipeline(): PipelineApi {
   const start = useCallback(async () => {
     const s = settingsRef.current;
     const fps = s?.recordingFps ?? 30;
+    // The capture contract is "primary monitor at physical pixels" (mouse
+    // coords are converted with the primary scale factor too). The control
+    // bar may sit on a secondary monitor, so currentMonitor() would size the
+    // request to the wrong panel and pad the frame with black.
+    const monitor =
+      (await primaryMonitor().catch(() => null)) ?? (await currentMonitor().catch(() => null));
     let displayStream: MediaStream;
     try {
+      // Deliberately NO width/height constraints. Asking WKWebView for the
+      // native 5K size made it allocate a physically-sized buffer, render
+      // the content at 1x in the top-left, and fill the rest with padding
+      // (black or stale pixels) — sometimes switching modes mid-recording.
+      // Every "black bars / frozen strips" bug traced back to that. Left to
+      // its own defaults the track is sized to the actual content and the
+      // frame is always fully used, making the physical→frame scale pure
+      // arithmetic (videoW / monitorW) with nothing to probe.
       displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: fps },
         audio: true,
@@ -231,24 +247,65 @@ export function useRecordingPipeline(): PipelineApi {
     video.muted = true;
     video.playsInline = true;
     await video.play().catch(() => undefined);
+    // play() doesn't guarantee metadata has landed; videoWidth/Height read 0
+    // until it does, which would produce a degenerate crop.
+    if (video.readyState < 1) {
+      await new Promise<void>((resolve) => {
+        video.addEventListener("loadedmetadata", () => resolve(), { once: true });
+        setTimeout(resolve, 1500);
+      });
+    }
     videoRef.current = video;
 
-    // Crop math lives in coords.ts (unit-tested). Validate the capture
-    // matches the primary monitor before relying on the region mapping.
-    const r = regionRef.current;
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
 
-    const monitor = await currentMonitor().catch(() => null);
-    if (monitor) {
-      const phys = monitor.size;
-      const check = validateCaptureAssumption(videoW, videoH, phys.width, phys.height);
-      if (!check.ok) {
-        void emit(EVT.CAMERA_ERROR, { message: check.reason ?? "capture_assumption_failed" });
-      }
-    }
-
-    const crop = computeCropRect(r, videoW, videoH);
+    // Physical px → frame px, by pure arithmetic. The unconstrained track is
+    // sized to the real content (no padding), so the ratio of frame size to
+    // the captured monitor's physical size IS the scale — nothing to probe.
+    // Regions and the mouse trail are in physical px and get multiplied by
+    // k to land in frame space; the same k goes into the sidecar so zoom
+    // replay maps the trail identically.
+    //
+    // Self-check: derive k from BOTH axes. If they disagree, `monitor` is
+    // not the captured screen (multi-monitor pick mismatch — its aspect
+    // differs) and dividing by its width would mis-crop. Fall back to
+    // 1/scaleFactor, the deterministic point→pixel ratio of an unconstrained
+    // WKWebView capture, which needs no knowledge of WHICH panel was grabbed.
+    const computeK = () => {
+      const fallback = 1 / (monitor?.scaleFactor || window.devicePixelRatio || 1);
+      if (!monitor || monitor.size.width <= 0 || monitor.size.height <= 0) return fallback;
+      const kx = video.videoWidth / monitor.size.width;
+      const ky = video.videoHeight / monitor.size.height;
+      return Math.abs(kx - ky) < 0.02 ? kx : fallback;
+    };
+    const applyScale = () => {
+      const k = computeK();
+      contentScaleRef.current = k;
+      const reg = regionRef.current;
+      const scaledRegion = reg && k !== 1
+        ? { x: reg.x * k, y: reg.y * k, width: reg.width * k, height: reg.height * k }
+        : reg;
+      cropRef.current = computeCropRect(scaledRegion, video.videoWidth, video.videoHeight);
+    };
+    applyScale();
+    const crop = cropRef.current!;
+    // Capture-time numbers for the sidecar; shown in the editor caption so
+    // mapping bugs can be diagnosed from a screenshot.
+    captureDebugRef.current = {
+      videoW,
+      videoH,
+      monW: monitor?.size.width ?? null,
+      monH: monitor?.size.height ?? null,
+      scaleFactor: monitor?.scaleFactor ?? null,
+      k: contentScaleRef.current,
+      region: regionRef.current,
+      crop: { ...crop },
+    };
+    // The output canvas keeps the INITIAL crop's size for the whole
+    // recording (encoders can't switch dimensions mid-stream); if the crop
+    // later shrinks (k drop), drawImage upscales that smaller source into
+    // the same canvas, preserving geometry at some sharpness cost.
     const canvas = document.createElement("canvas");
     canvas.width = crop.sw;
     canvas.height = crop.sh;
@@ -259,53 +316,86 @@ export function useRecordingPipeline(): PipelineApi {
       return;
     }
     canvasRef.current = canvas;
+    captureSizeRef.current = { w: videoW, h: videoH };
+    cropRef.current = { ...crop };
 
-    // Auto-zoom: follow the cursor with a magnified crop that zooms in on
-    // activity and settles back to the base crop after a dwell. Cursor
-    // coordinates arrive via the shared event tap (physical pixels, same
-    // space as the crop rect under the 1:1 capture assumption).
-    if (s?.recordingAutoZoom) {
-      zoomStateRef.current = { cursor: null, lastActivity: 0, current: { ...crop } };
-      const onCursor = (p: MousePayload) => {
-        const zs = zoomStateRef.current;
-        if (zs) {
-          zs.cursor = { x: p.x, y: p.y };
-          zs.lastActivity = Date.now();
-        }
-      };
-      zoomUnlistenRef.current = await Promise.all([
-        listen<MousePayload>(EVT.MOUSE_MOVE, (e) => onCursor(e.payload)),
-        listen<MousePayload>(EVT.MOUSE_DOWN, (e) => onCursor(e.payload)),
-      ]);
-      // The cursor overlay enables mouse tracking itself; without it we must
-      // gate the event tap on explicitly (and off again in stop()).
-      if (!s.recordingCursorOverlay) {
-        void setMouseTrackingEnabled(true);
-      }
-    }
-
-    const drawFrame = () => {
-      if (!ctx || !videoRef.current || !canvasRef.current) return;
-      if (videoRef.current.readyState >= 2) {
-        let source = crop;
-        const zs = zoomStateRef.current;
-        if (zs) {
-          const zooming = zs.cursor !== null && Date.now() - zs.lastActivity < ZOOM_HOLD_MS;
-          const focus = zs.cursor ?? { x: crop.sx + crop.sw / 2, y: crop.sy + crop.sh / 2 };
-          const factor = settingsRef.current?.recordingZoomFactor ?? 2;
-          const target = computeZoomedCrop(focus, crop, zooming ? factor : 1);
-          zs.current = smoothCrop(zs.current, target, ZOOM_SMOOTHING);
-          source = zs.current;
-        }
-        ctx.drawImage(
-          videoRef.current,
-          source.sx, source.sy, source.sw, source.sh,
-          0, 0, canvas.width, canvas.height,
-        );
-      }
-      rafRef.current = requestAnimationFrame(drawFrame);
+    // Record the cursor trajectory for post-capture zoom. The canvas no
+    // longer bakes zoom in; the editor + export pipeline replay this trail
+    // to apply a retunable zoom after the fact, so the draft stays clean.
+    // Sampling runs whenever a recording is active, independent of the
+    // cursor-overlay / auto-zoom settings (those only govern replay defaults).
+    cursorTrailRef.current = [];
+    const pushSample = (p: MousePayload, type: CursorSample["type"]) => {
+      const anchor = recStartPerfRef.current;
+      if (anchor === 0) return; // not yet recording (countdown phase)
+      cursorTrailRef.current.push({
+        t: performance.now() - anchor,
+        x: p.x,
+        y: p.y,
+        type,
+        ...(type === "move" ? {} : { button: p.button === "right" ? "right" : "left" }),
+      });
     };
-    rafRef.current = requestAnimationFrame(drawFrame);
+    cursorUnlistenRef.current = await Promise.all([
+      listen<MousePayload>(EVT.MOUSE_MOVE, (e) => pushSample(e.payload, "move")),
+      listen<MousePayload>(EVT.MOUSE_DOWN, (e) => pushSample(e.payload, "down")),
+      listen<MousePayload>(EVT.MOUSE_UP, (e) => pushSample(e.payload, "up")),
+    ]);
+    // Always gate the event tap on ourselves so the trajectory is captured
+    // regardless of the cursor-overlay setting. The overlay also calls
+    // set_mouse_tracking(true) when it comes up, but that happens after the
+    // countdown — relying on it would lose the opening seconds of cursor
+    // movement. We turn it back off in stop().
+    void setMouseTrackingEnabled(true);
+
+    // Last seen track dimensions; a mid-recording change (the webview
+    // resizing the capture track) invalidates the crop immediately.
+    let lastVW = videoW;
+    let lastVH = videoH;
+    const drawFrame = () => {
+      const v = videoRef.current;
+      if (!ctx || !v || !canvasRef.current) return;
+      if (v.readyState < 2) return;
+      // Track resize → recompute k and the crop arithmetically, same frame.
+      if (v.videoWidth !== lastVW || v.videoHeight !== lastVH) {
+        lastVW = v.videoWidth;
+        lastVH = v.videoHeight;
+        applyScale();
+      }
+      const c = cropRef.current;
+      if (!c) return;
+      // Intersect the source rect with the actual frame. drawImage CLIPS an
+      // out-of-bounds source and shrinks the destination proportionally —
+      // without this, a stale crop leaves canvas edges unpainted forever
+      // (frozen first-frame strips in the draft).
+      const sx0 = Math.max(c.sx, 0);
+      const sy0 = Math.max(c.sy, 0);
+      const sx1 = Math.min(c.sx + c.sw, v.videoWidth);
+      const sy1 = Math.min(c.sy + c.sh, v.videoHeight);
+      const sw = sx1 - sx0;
+      const sh = sy1 - sy0;
+      if (sw <= 0 || sh <= 0) return;
+      const clipped = sw < c.sw - 0.5 || sh < c.sh - 0.5;
+      if (clipped) {
+        // Some of the canvas won't be painted this frame; black-fill so no
+        // region ever shows stale pixels. Skipped on the hot path (opaque
+        // context + full-cover drawImage overwrite every pixel).
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      const scaleX = canvas.width / c.sw;
+      const scaleY = canvas.height / c.sh;
+      ctx.drawImage(
+        v,
+        sx0, sy0, sw, sh,
+        (sx0 - c.sx) * scaleX, (sy0 - c.sy) * scaleY, sw * scaleX, sh * scaleY,
+      );
+    };
+    // setInterval, not requestAnimationFrame: this pipeline runs in the main
+    // camera window, and rAF is throttled/paused when the hosting window is
+    // hidden or occluded — which would freeze the recording. Timers keep
+    // firing regardless of window visibility.
+    cropIntervalRef.current = setInterval(drawFrame, Math.max(1000 / fps, 16));
 
     const canvasStream = canvas.captureStream(fps);
     displayStream.getAudioTracks().forEach((track) => canvasStream.addTrack(track));
@@ -343,6 +433,10 @@ export function useRecordingPipeline(): PipelineApi {
       }
       setCountdown(0);
       recorder.start(1000);
+      // Anchor the trajectory timeline to the moment encoding actually
+      // begins, so `cursor[i].t` lines up with `video.currentTime * 1000`
+      // when the editor replays the trail.
+      recStartPerfRef.current = performance.now();
       setStatus("recording");
       startTimeRef.current = Date.now();
       setElapsed(0);
@@ -365,6 +459,14 @@ export function useRecordingPipeline(): PipelineApi {
     if (statusRef.current === "countdown") {
       cleanupStream();
       recorderRef.current = null;
+      cursorTrailRef.current = [];
+      cropRef.current = null;
+      captureSizeRef.current = { w: 0, h: 0 };
+      contentScaleRef.current = 1;
+      recStartPerfRef.current = 0;
+      if (!settingsRef.current?.recordingCursorOverlay) {
+        void setMouseTrackingEnabled(false);
+      }
       setStatus("idle");
       return;
     }
@@ -376,15 +478,29 @@ export function useRecordingPipeline(): PipelineApi {
       const mime = mimeRef.current;
       const blob = new Blob(chunksRef.current, { type: mime.split(";")[0] });
       chunksRef.current = [];
+      // Snapshot the trajectory + geometry before tearing down listeners, so
+      // the metadata sidecar can be written after cleanupStream.
+      const trail = cursorTrailRef.current;
+      const cropSnap = cropRef.current;
+      const captureSize = captureSizeRef.current;
+      const regionSnap = regionRef.current;
+      const contentScaleSnap = contentScaleRef.current;
+      const dpr = window.devicePixelRatio || 1;
       cleanupStream();
       recorderRef.current = null;
+      cursorTrailRef.current = [];
+      cropRef.current = null;
+      captureSizeRef.current = { w: 0, h: 0 };
+      contentScaleRef.current = 1;
+      recStartPerfRef.current = 0;
 
       setStatus("idle");
       setElapsed(0);
       void emit(EVT.RECORDING_STATUS, { active: false });
       if (settingsRef.current?.recordingCursorOverlay) {
+        // Hiding the overlay also turns mouse tracking off internally.
         void setCursorOverlay(false);
-      } else if (settingsRef.current?.recordingAutoZoom) {
+      } else {
         // We enabled mouse tracking ourselves in start(); gate it back off.
         void setMouseTrackingEnabled(false);
       }
@@ -393,7 +509,23 @@ export function useRecordingPipeline(): PipelineApi {
         // Hand the raw capture to the editor window (trim/export happens
         // there); the save dialog now lives in the editor's export flow.
         const buf = new Uint8Array(await blob.arrayBuffer());
-        await saveRecordingDraft(buf, extensionForMime(mime));
+        const draftPath = await saveRecordingDraft(buf, extensionForMime(mime));
+        // Persist the metadata sidecar so the editor can replay zoom. A
+        // failure here is non-fatal — the video is already saved; the editor
+        // just falls back to a no-zoom preview.
+        if (cropSnap) {
+          const meta: RecordingMeta = {
+            captureWidth: captureSize.w,
+            captureHeight: captureSize.h,
+            crop: cropSnap,
+            dpr,
+            region: regionSnap,
+            cursor: trail,
+            contentScale: contentScaleSnap,
+            debug: captureDebugRef.current ?? undefined,
+          };
+          await saveRecordingMeta(draftPath, meta).catch(() => undefined);
+        }
         setInfo(locale === "zh" ? "正在打开编辑器…" : "Opening editor…");
         await openEditorWindow();
       } catch (err) {
@@ -447,6 +579,45 @@ export function useRecordingPipeline(): PipelineApi {
   }, [toggle]);
 
   const clearInfo = useCallback(() => setInfo(""), []);
+
+  // --- Remote-control wiring (control bar lives in another window) ---
+
+  // Broadcast UI state on every change so the control bar mirrors it.
+  useEffect(() => {
+    const payload: RecordingUiPayload = { status, elapsed, countdown, info };
+    void emit(EVT.RECORDING_UI, payload);
+  }, [status, elapsed, countdown, info]);
+
+  // Execute commands sent by the control bar. `sync` re-broadcasts current
+  // state for a bar that (re)opened after the state last changed.
+  useEffect(() => {
+    const unlisten = listen<RecordingCmdPayload>(EVT.RECORDING_CMD, (e) => {
+      switch (e.payload.action) {
+        case "toggle":
+          void toggle();
+          break;
+        case "toggle-pause":
+          togglePause();
+          break;
+        case "clear-info":
+          clearInfo();
+          break;
+        case "sync": {
+          const payload: RecordingUiPayload = {
+            status: statusRef.current,
+            elapsed: elapsedRef.current,
+            countdown: 0,
+            info: "",
+          };
+          void emit(EVT.RECORDING_UI, payload);
+          break;
+        }
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [toggle, togglePause, clearInfo]);
 
   return {
     status,

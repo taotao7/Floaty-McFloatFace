@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <mask id="body-cutouts">
+      <rect width="64" height="64" fill="white" />
+      <circle cx="32" cy="26" r="14" fill="black" />
+      <path
+        d="M27 43.5c3.2 2.7 6.8 2.7 10 0"
+        fill="none"
+        stroke="black"
+        stroke-linecap="round"
+        stroke-width="3.5"
+      />
+    </mask>
+    <mask id="pupil-cutout">
+      <rect width="64" height="64" fill="white" />
+      <circle cx="29.5" cy="23.5" r="2.5" fill="black" />
+    </mask>
+  </defs>
+
+  <path
+    d="M32 4C17.9 4 8 14.1 8 29.2v14.1C8 53.7 14.4 59 23.1 57l4.1-1c3.2-.8 6.4-.8 9.6 0l4.1 1C49.6 59 56 53.7 56 43.3V29.2C56 14.1 46.1 4 32 4Z"
+    fill="#B7FF00"
+    mask="url(#body-cutouts)"
+  />
+  <circle cx="32" cy="26" r="7" fill="#B7FF00" mask="url(#pupil-cutout)" />
+</svg>

@@ -1,35 +1,40 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { Pause, Play, Square, Crop, Monitor } from "lucide-react";
-import { resetRecordingRegion, startRegionSelect } from "../lib/tauri";
-import { useRecordingPipeline } from "../hooks/useRecordingPipeline";
+import { getAppSettings, resetRecordingRegion, startRegionSelect } from "../lib/tauri";
+import { useRecordingRemote } from "../hooks/useRecordingRemote";
+import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
+import { EVT } from "../lib/events";
+import type { AppSettings } from "../types/app";
 
 /**
- * The floating recording control bar — now a thin view over
- * `useRecordingPipeline`. This component owns only UI concerns: window
- * dragging, button wiring, and derived display strings. All pipeline state
- * (stream, recorder, canvas, chunks, timing) lives in the hook.
+ * The floating recording control bar — a REMOTE CONTROL for the pipeline,
+ * which runs in the main camera window (WebKit's one-capture-per-page policy
+ * forces camera + screen capture into the same document; see
+ * `useRecordingPipeline`). This component owns only UI concerns: window
+ * dragging, button wiring, and derived display strings, all mirrored over
+ * `app://recording-ui` / `app://recording-cmd`.
  */
-export default function RecordingControlWindow() {
+function RecordingControlContent() {
   const {
     status,
     elapsed,
     countdown,
     info,
     region,
-    locale,
     toggle,
     togglePause,
     clearInfo,
-  } = useRecordingPipeline();
+  } = useRecordingRemote();
   const [dragging, setDragging] = useState(false);
 
-  const t = makeT(locale);
+  const t = useI18n();
   const recording = status === "recording" || status === "paused";
   const countingDown = status === "countdown";
   const regionLabel = region
     ? `${Math.round(region.width / (window.devicePixelRatio || 1))}×${Math.round(region.height / (window.devicePixelRatio || 1))}`
-    : t.full;
+    : t.recording_region_full;
 
   const handleDrag = () => {
     setDragging(true);
@@ -59,10 +64,10 @@ export default function RecordingControlWindow() {
         data-role="btn"
         className={`rec-btn primary${!recording && !countingDown ? " rec-btn-start" : ""}`}
         onClick={() => void toggle()}
-        title={recording || countingDown ? t.stop : t.record}
+        title={recording || countingDown ? t.recording_stop : t.recording_record}
       >
         {recording || countingDown ? <Square size={15} /> : <Play size={15} />}
-        {!recording && !countingDown && <span className="rec-label">{t.rec}</span>}
+        {!recording && !countingDown && <span className="rec-label">{t.recording_rec}</span>}
       </button>
       {recording && (
         <button
@@ -70,7 +75,7 @@ export default function RecordingControlWindow() {
           data-role="btn"
           className="rec-btn"
           onClick={togglePause}
-          title={status === "paused" ? t.resume : t.pause}
+          title={status === "paused" ? t.recording_resume : t.recording_pause}
         >
           {status === "paused" ? <Play size={15} /> : <Pause size={15} />}
         </button>
@@ -81,7 +86,7 @@ export default function RecordingControlWindow() {
         data-role="btn"
         className="rec-btn"
         onClick={onPickRegion}
-        title={t.region}
+        title={t.recording_region_pick}
         disabled={recording || countingDown}
       >
         <Crop size={15} />
@@ -91,13 +96,13 @@ export default function RecordingControlWindow() {
         data-role="btn"
         className="rec-btn"
         onClick={() => void onFull()}
-        title={t.full}
+        title={t.recording_region_full}
         disabled={recording || countingDown}
       >
         <Monitor size={15} />
       </button>
       <span className="rec-region">{regionLabel}</span>
-      {status === "saving" && <span className="rec-info">{t.savingMsg}</span>}
+      {status === "saving" && <span className="rec-info">{t.recording_saving}</span>}
       {info && !recording && status !== "saving" && (
         <span className="rec-info" title={info} onClick={clearInfo} style={{ cursor: "pointer" }}>
           {info}
@@ -118,27 +123,33 @@ function formatTime(total: number) {
   return `${m}:${s}`;
 }
 
-function makeT(locale: string) {
-  if (locale === "zh") {
-    return {
-      rec: "开始",
-      record: "开始录制",
-      stop: "停止录制",
-      pause: "暂停",
-      resume: "继续",
-      region: "框选区域",
-      full: "全屏",
-      savingMsg: "正在保存…",
+export default function RecordingControlWindow() {
+  const [locale, setLocale] = useState<Locale>(detectLocale());
+
+  useEffect(() => {
+    const load = async () => {
+      const persisted = await getAppSettings();
+      if (persisted.locale) {
+        setLocale(persisted.locale as Locale);
+      }
     };
-  }
-  return {
-    rec: "REC",
-    record: "Record",
-    stop: "Stop",
-    pause: "Pause",
-    resume: "Resume",
-    region: "Select Region",
-    full: "Full Screen",
-    savingMsg: "Saving…",
-  };
+    void load();
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
+      if (event.payload.locale) {
+        setLocale(event.payload.locale as Locale);
+      }
+    });
+    return () => { void unlistenPromise.then((unlisten) => unlisten()); };
+  }, []);
+
+  const messages = getMessages(locale);
+
+  return (
+    <I18nProvider value={messages}>
+      <RecordingControlContent />
+    </I18nProvider>
+  );
 }

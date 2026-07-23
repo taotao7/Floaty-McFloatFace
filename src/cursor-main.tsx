@@ -2,6 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
 import "./lib/disableContextMenu";
+import { initTheme } from "./lib/theme";
+
+initTheme();
 
 const root = document.getElementById("root") as HTMLElement;
 

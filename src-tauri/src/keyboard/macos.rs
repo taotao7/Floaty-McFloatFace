@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
@@ -10,9 +10,37 @@ use super::KeyEventPayload;
 /// via the `set_mouse_tracking_enabled` command.
 pub static MOUSE_TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Last mouse-move emit time (ms since epoch), for throttling. macOS delivers
+/// moves at the sensor rate (up to several hundred Hz on gaming mice); each
+/// emit crosses the IPC boundary and wakes every listening webview, so
+/// unthrottled moves measurably jank the UI while recording. Down/up events
+/// are never throttled.
+static LAST_MOVE_EMIT_MS: AtomicU64 = AtomicU64::new(0);
+/// Minimum interval between mouse-move emits (~60 Hz — matches the highest
+/// recording frame rate; finer trails are invisible in the output).
+const MOVE_EMIT_INTERVAL_MS: u64 = 16;
+
+/// Primary-monitor scale factor ×1000, cached when tracking starts. Querying
+/// `primary_monitor()` on every mouse event walks the display list — far too
+/// heavy for a callback that fires hundreds of times per second.
+static CACHED_SCALE_X1000: AtomicU64 = AtomicU64::new(1000);
+
 /// Enable/disable mouse tracking at runtime. Called from the recording command.
 pub fn set_mouse_tracking(enabled: bool) {
     MOUSE_TRACKING_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// Refresh the cached display scale factor. Called with the tap's AppHandle
+/// whenever tracking is (re)enabled, so a monitor swap mid-session is picked
+/// up at the next recording start.
+pub fn refresh_cached_scale(app: &AppHandle) {
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    CACHED_SCALE_X1000.store((scale * 1000.0) as u64, Ordering::SeqCst);
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -289,25 +317,30 @@ extern "C" fn tap_callback(
             K_CG_EVENT_MOUSE_MOVED => Some((crate::events::evt::MOUSE_MOVE, "")),
             _ => None,
         } {
+            let now = now_millis();
+            // Throttle moves to ~60 Hz; clicks always pass. Emitting at the
+            // raw sensor rate floods the IPC channel and janks every webview.
+            if event_type == K_CG_EVENT_MOUSE_MOVED {
+                let last = LAST_MOVE_EMIT_MS.load(Ordering::Relaxed);
+                if now.saturating_sub(last) < MOVE_EMIT_INTERVAL_MS {
+                    return event;
+                }
+                LAST_MOVE_EMIT_MS.store(now, Ordering::Relaxed);
+            }
             let pt = unsafe { CGEventGetLocation(event) };
             // CGEventGetLocation reports display coordinates (points). The
             // recording contract (RecordingRegion, crop math, cursor overlay)
             // is physical pixels, so convert with the primary monitor's scale
-            // factor — the feature is scoped to the primary monitor anyway.
-            let scale = ctx
-                .app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .unwrap_or(1.0);
+            // factor — cached by refresh_cached_scale; querying the display
+            // list here would be far too slow at event rate.
+            let scale = CACHED_SCALE_X1000.load(Ordering::Relaxed) as f64 / 1000.0;
             let _ = ctx.app.emit(
                 event_name,
                 serde_json::json!({
                     "x": pt.x * scale,
                     "y": pt.y * scale,
                     "button": button,
-                    "timestamp": now_millis(),
+                    "timestamp": now,
                 }),
             );
             return event;

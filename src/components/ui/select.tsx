@@ -11,14 +11,14 @@ export function SelectTrigger({ className, children, ...props }: ComponentPropsW
   return (
     <SelectPrimitive.Trigger
       className={cn(
-        "flex h-11 w-full items-center justify-between rounded-xl border border-[#d1dbe8] bg-white px-3 text-sm text-[#0f172a] shadow-sm outline-none focus:ring-2 focus:ring-[#fdba74]",
+        "flex h-11 w-full items-center justify-between rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--fg)] shadow-sm outline-none focus:ring-2 focus:ring-[var(--border-focus)]",
         className,
       )}
       {...props}
     >
       {children}
       <SelectPrimitive.Icon>
-        <ChevronDown className="h-4 w-4 text-[#64748b]" />
+        <ChevronDown className="h-4 w-4 text-[var(--muted)]" />
       </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   );
@@ -28,7 +28,7 @@ export function SelectContent({ className, children, ...props }: ComponentPropsW
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
-        className={cn("z-50 min-w-[220px] overflow-hidden rounded-xl border border-[#d1dbe8] bg-white p-1 shadow-xl", className)}
+        className={cn("z-50 min-w-[220px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)] p-1 text-[var(--fg)] shadow-xl", className)}
         {...props}
       >
         <SelectPrimitive.Viewport className="p-1">{children}</SelectPrimitive.Viewport>
@@ -45,14 +45,14 @@ export function SelectItem({ className, children, ...props }: ComponentPropsWith
   return (
     <SelectPrimitive.Item
       className={cn(
-        "relative flex h-9 cursor-pointer select-none items-center rounded-md py-1.5 pl-8 pr-2 text-sm text-[#0f172a] outline-none focus:bg-[#f1f5f9]",
+        "relative flex h-9 cursor-pointer select-none items-center rounded-md py-1.5 pl-8 pr-2 text-sm text-[var(--fg)] outline-none focus:bg-[var(--surface-hover)]",
         className,
       )}
       {...props}
     >
       <span className="absolute left-2 inline-flex h-4 w-4 items-center justify-center">
         <SelectPrimitive.ItemIndicator>
-          <Check className="h-4 w-4 text-[#fb923c]" />
+          <Check className="h-4 w-4 text-[var(--accent)]" />
         </SelectPrimitive.ItemIndicator>
       </span>
       <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>

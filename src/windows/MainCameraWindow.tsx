@@ -15,6 +15,7 @@ import {
   toggleMainWindowVisibility,
 } from "../lib/tauri";
 import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
+import { useRecordingPipeline } from "../hooks/useRecordingPipeline";
 
 const defaultRuntime: RuntimeState = {
   visible: true,
@@ -38,6 +39,18 @@ function MainCameraContent() {
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Generation counter for camera (re)connects: only the newest attempt may
+  // bind its stream to the <video>. Stale/slow acquisitions are stopped on
+  // arrival, so concurrent connects (bootstrap vs settings effect vs
+  // devicechange) can never leave the element bound to a dead stream.
+  const connectGenRef = useRef(0);
+  // WebKit mute recovery state: reconnect attempts since the last healthy
+  // (unmuted) stream, and the pending delayed-reconnect timer. Mutes from
+  // our own screen recording no longer happen — the recording pipeline runs
+  // in THIS window (see useRecordingPipeline), and same-page captures
+  // coexist — but other apps / OS events can still mute the camera.
+  const muteRetryRef = useRef(0);
+  const muteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const devicesRef = useRef(devices);
@@ -56,23 +69,70 @@ function MainCameraContent() {
       return;
     }
 
+    const gen = ++connectGenRef.current;
     try {
-      stopStream(streamRef.current);
       const targetId = cameraId
         || settingsRef.current.selectedCameraId
         || (devicesRef.current.length > 0 ? devicesRef.current[0].deviceId : undefined);
+      // Acquire BEFORE touching the live stream: a failed or hung re-acquire
+      // must leave the current picture on screen instead of going black.
       const stream = await startAdaptiveStream(targetId);
+      if (gen !== connectGenRef.current) {
+        // A newer connect superseded this one while we were acquiring.
+        stopStream(stream);
+        return;
+      }
+      stopStream(streamRef.current);
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
+      // If the OS kills the track (device yanked, capture session revoked),
+      // re-acquire instead of sitting on a black frame.
+      const track = stream.getVideoTracks()[0];
+      track?.addEventListener("ended", () => {
+        if (streamRef.current === stream) void connectCamera();
+      });
+      // A muted track outputs black frames without ever firing `ended` (e.g.
+      // another app grabs the device, OS policy). Wait a beat in case WebKit
+      // unmutes on its own, then re-acquire; the retry budget stops us
+      // looping if every acquisition comes back muted.
+      const scheduleMuteRecovery = () => {
+        if (streamRef.current !== stream || muteTimerRef.current) return;
+        muteTimerRef.current = setTimeout(() => {
+          muteTimerRef.current = null;
+          if (streamRef.current !== stream || !track || !track.muted) return;
+          if (muteRetryRef.current >= 3) return;
+          muteRetryRef.current += 1;
+          void connectCamera();
+        }, 1200);
+      };
+      track?.addEventListener("mute", scheduleMuteRecovery);
+      track?.addEventListener("unmute", () => {
+        if (streamRef.current !== stream) return;
+        muteRetryRef.current = 0;
+        if (muteTimerRef.current) {
+          clearTimeout(muteTimerRef.current);
+          muteTimerRef.current = null;
+        }
+      });
+      if (track && !track.muted) {
+        // A track acquired unmuted is healthy: reset the retry budget.
+        muteRetryRef.current = 0;
+      } else if (track) {
+        // Born muted (no `mute` event will fire): go straight to recovery.
+        scheduleMuteRecovery();
+      }
 
       setRuntime((prev) => ({ ...prev, permission: "granted", streamReady: true }));
       setStatus(t.camera_connected);
       setTimeout(() => setStatusHidden(true), 1500);
     } catch (error) {
-      const isDenied = error instanceof DOMException && error.name === "NotAllowedError";
-      setRuntime((prev) => ({ ...prev, permission: "denied", streamReady: false }));
+      if (gen !== connectGenRef.current) return;
+      // Keep any live stream on screen; only surface the failure in the UI.
+      const hasLiveStream = streamRef.current !== null;
+      setRuntime((prev) => ({ ...prev, permission: "denied", streamReady: hasLiveStream }));
       setStatus(t.camera_access_denied);
       setStatusHidden(false);
+      const isDenied = error instanceof DOMException && error.name === "NotAllowedError";
       if (isDenied) {
         await openCameraPrivacySettings();
       }
@@ -82,7 +142,8 @@ function MainCameraContent() {
     }
   }, [t]);
 
-  // Bootstrap: load settings → enumerate → connect
+  // Bootstrap: load settings → enumerate → connect (only when the
+  // selectedCameraId effect below won't, i.e. no persisted preference).
   useEffect(() => {
     let mounted = true;
     const bootstrap = async () => {
@@ -96,10 +157,12 @@ function MainCameraContent() {
       if (!mounted) return;
       setDevices(cameraList);
 
-      const targetId = persisted.selectedCameraId
-        || (cameraList.length > 0 ? cameraList[0].deviceId : undefined);
-      await connectCamera(targetId);
-      if (!mounted) return;
+      // With a persisted camera, the selectedCameraId effect owns the
+      // connect; acquiring here too would just double-open the device.
+      if (!persisted.selectedCameraId) {
+        await connectCamera(cameraList.length > 0 ? cameraList[0].deviceId : undefined);
+        if (!mounted) return;
+      }
 
       // Re-enumerate after permission granted (labels become available)
       const updatedList = await listBrowserCameras();
@@ -109,23 +172,41 @@ function MainCameraContent() {
     return () => { mounted = false; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-connect when user changes camera in settings
+  // Re-connect when user changes camera in settings. The old stream is
+  // swapped out inside connectCamera only after its replacement is live.
   useEffect(() => {
     if (!settings.selectedCameraId) return;
     void connectCamera(settings.selectedCameraId);
-    return () => { stopStream(streamRef.current); };
   }, [settings.selectedCameraId, connectCamera]);
 
-  // Handle hot-plug
+  // Stop the stream only on unmount (and drop any pending mute-recovery timer).
+  useEffect(() => () => {
+    if (muteTimerRef.current) clearTimeout(muteTimerRef.current);
+    stopStream(streamRef.current);
+  }, []);
+
+  // Handle hot-plug. Debounced and gated on the *video* device set actually
+  // changing — audio-only changes (e.g. getDisplayMedia grabbing the mic when
+  // a screen recording starts) must not bounce the camera.
   useEffect(() => {
     if (!navigator.mediaDevices) return;
-    const onDeviceChanged = async () => {
-      const cameraList = await listBrowserCameras();
-      setDevices(cameraList);
-      await connectCamera();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onDeviceChanged = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const cameraList = await listBrowserCameras();
+        const prevIds = devicesRef.current.map((d) => d.deviceId).sort().join("|");
+        const nextIds = cameraList.map((d) => d.deviceId).sort().join("|");
+        if (nextIds === prevIds) return;
+        setDevices(cameraList);
+        await connectCamera();
+      }, 300);
     };
     navigator.mediaDevices.addEventListener("devicechange", onDeviceChanged);
-    return () => navigator.mediaDevices.removeEventListener("devicechange", onDeviceChanged);
+    return () => {
+      if (timer) clearTimeout(timer);
+      navigator.mediaDevices.removeEventListener("devicechange", onDeviceChanged);
+    };
   }, [connectCamera]);
 
   useEffect(() => {
@@ -142,6 +223,7 @@ function MainCameraContent() {
     });
     return () => { void unlistenPromise.then((unlisten) => unlisten()); };
   }, [connectCamera]);
+
 
   useEffect(() => {
     const hotkeys = async () => {
@@ -296,6 +378,14 @@ function MainCameraContent() {
 
 export function MainCameraWindow() {
   const [locale, setLocale] = useState<Locale>(detectLocale());
+
+  // The screen-recording pipeline is HOSTED here, not in the recording bar:
+  // WebKit allows one active capture per page ("latest wins" muting), so the
+  // camera stream and the display capture must live in the same document to
+  // coexist. The recording bar is a remote control (useRecordingRemote)
+  // driving this instance over app://recording-cmd / app://recording-ui.
+  // NOTE: keep this window alive (hide, never close) while recording.
+  useRecordingPipeline();
 
   useEffect(() => {
     const load = async () => {

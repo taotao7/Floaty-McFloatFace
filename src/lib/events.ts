@@ -29,6 +29,14 @@ export const EVT = {
   MOUSE_MOVE: "app://mouse-move",
   // Screen recording — orchestration
   RECORDING_STATUS: "app://recording-status",
+  /** Control-bar → pipeline commands. The pipeline lives in the MAIN camera
+   *  window (so camera + screen capture share one document and WebKit's
+   *  one-capture-per-page mute policy never fires); the recording bar is a
+   *  remote control that sends actions here. */
+  RECORDING_CMD: "app://recording-cmd",
+  /** Pipeline → control-bar UI state broadcast (status/elapsed/countdown/
+   *  info). Emitted on every change and in response to a `sync` command. */
+  RECORDING_UI: "app://recording-ui",
   REGION_STARTED: "app://region-started",
   REGION_SELECTED: "app://region-selected",
   REGION_CANCELED: "app://region-canceled",
@@ -64,6 +72,19 @@ export interface MousePayload {
 
 export interface RecordingStatusPayload {
   active: boolean;
+}
+
+export interface RecordingCmdPayload {
+  /** `sync` asks the pipeline to re-broadcast its current UI state (used by
+   *  the control bar on mount, since it may open after state was set). */
+  action: "toggle" | "toggle-pause" | "clear-info" | "sync";
+}
+
+export interface RecordingUiPayload {
+  status: "idle" | "countdown" | "recording" | "paused" | "saving";
+  elapsed: number;
+  countdown: number;
+  info: string;
 }
 
 export interface PermissionStatusPayload {

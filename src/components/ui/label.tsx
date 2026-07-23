@@ -5,7 +5,7 @@ import { cn } from "../../lib/utils";
 export function Label({ className, ...props }: ComponentPropsWithoutRef<typeof LabelPrimitive.Root>) {
   return (
     <LabelPrimitive.Root
-      className={cn("text-sm font-semibold tracking-wide text-[#334155]", className)}
+      className={cn("text-sm font-semibold tracking-wide text-[var(--fg)]", className)}
       {...props}
     />
   );

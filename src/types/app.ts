@@ -14,6 +14,65 @@ export interface RecordingRegion {
   height: number;
 }
 
+/**
+ * Source-frame crop rectangle handed to `CanvasRenderingContext2D.drawImage`.
+ * Mirrors `CropRect` from `lib/coords.ts`; duplicated here so the recording
+ * metadata type can be self-contained without a runtime import cycle.
+ */
+export interface CropRect {
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+}
+
+/** One sample of the recorded cursor trajectory, for post-capture zoom. */
+export interface CursorSample {
+  /** Milliseconds since recording start (`performance.now()` based). */
+  t: number;
+  /** Global physical screen pixels (same space as `MousePayload.x/y`). */
+  x: number;
+  y: number;
+  /** Event kind. `down`/`up` always sampled; `move` is every system event. */
+  type: "move" | "down" | "up";
+  /** Mouse button, for click styling. Omitted for `move`. */
+  button?: "left" | "right";
+}
+
+/**
+ * Metadata persisted alongside a draft recording (`draft-<id>.json` sidecar).
+ *
+ * The recording canvas no longer bakes auto-zoom into the video; instead it
+ * captures the raw region crop and records the cursor trajectory. The editor
+ * and the export pipeline replay the trajectory to apply zoom after the fact,
+ * which keeps the source clean (no smearing artifacts) and lets the user
+ * toggle/retune zoom without re-recording.
+ */
+export interface RecordingMeta {
+  /** Captured display-stream native resolution (`video.videoWidth/Height`). */
+  captureWidth: number;
+  captureHeight: number;
+  /** Base crop rect (frame-local physical px) the draft video contains. */
+  crop: CropRect;
+  /** Device pixel ratio at capture time. */
+  dpr: number;
+  /** Recording region (null = full frame). */
+  region: RecordingRegion | null;
+  /** Cursor trajectory in global physical px, ordered by `t` ascending. */
+  cursor: CursorSample[];
+  /**
+   * Scale from global physical px (trail/region space) to captured frame
+   * px, computed at record time as videoWidth / monitor physical width.
+   * `1` = frame is 1:1 physical; `<1` (e.g. 0.5 on a 2x display) means the
+   * webview captured at 1x. Zoom replay must multiply trail coords by this
+   * before localizing. Absent in old sidecars — treat as 1.
+   */
+  contentScale?: number;
+  /** Raw capture-time numbers, for diagnosing mapping bugs from the editor
+   *  caption without reproducing locally. Free-form; not read by replay. */
+  debug?: Record<string, unknown>;
+}
+
 export interface CameraDevice {
   deviceId: string;
   label: string;
@@ -33,6 +92,7 @@ export interface AppSettings {
   beautySmoothness: number;
   beautyBrightness: number;
   locale: string;
+  theme: "system" | "light" | "dark";
   keyboardDisplayEnabled: boolean;
   keyboardDisplayPosition: "bottom-center" | "top-center" | "bottom-left" | "bottom-right";
   keyboardDisplayScale: number;
@@ -75,6 +135,7 @@ export const defaultSettings: AppSettings = {
   beautySmoothness: 30,
   beautyBrightness: 50,
   locale: "",
+  theme: "system",
   keyboardDisplayEnabled: true,
   keyboardDisplayPosition: "bottom-center",
   keyboardDisplayScale: 1,

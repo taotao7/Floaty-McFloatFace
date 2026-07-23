@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import type { AppSettings, KeyEvent, KeyboardDisplayStyle } from "../types/app";
 import { getAppSettings } from "../lib/tauri";
+import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
 
 interface DisplayKey {
   key: string;
@@ -31,11 +32,11 @@ function getMaxKeys(): number {
   return Math.max(2, Math.floor((width - CONTAINER_PADDING) / BADGE_WIDTH));
 }
 
-export default function KeyboardWindow() {
+function KeyboardContent() {
+  const t = useI18n();
   const [displayKeys, setDisplayKeys] = useState<DisplayKey[]>([]);
   const [dragging, setDragging] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
-  const [locale, setLocale] = useState(() => navigator.language.startsWith("zh") ? "zh" : "en");
   const [accessibilityGranted, setAccessibilityGranted] = useState<boolean | null>(null);
   const [eventTapActive, setEventTapActive] = useState<boolean | null>(null);
   const [keyScale, setKeyScale] = useState(1.0);
@@ -60,7 +61,6 @@ export default function KeyboardWindow() {
       fadeOutMsRef.current = s.keyboardDisplayFadeOut || DEFAULT_FADE_OUT_MS;
       setKeyScale(s.keyboardDisplayScale ?? 1.0);
       setKeyStyle(s.keyboardDisplayStyle ?? "dark");
-      if (s.locale) setLocale(s.locale.startsWith("zh") ? "zh" : "en");
       const scale = s.keyboardDisplayScale ?? 1.0;
       const width = s.keyboardDisplayWidth || 800;
       const height = Math.round(80 * scale);
@@ -89,9 +89,6 @@ export default function KeyboardWindow() {
       const scale = event.payload.keyboardDisplayScale ?? 1.0;
       const height = Math.round(80 * scale);
       getCurrentWindow().setSize(new LogicalSize(width, height));
-      if (event.payload.locale) {
-        setLocale(event.payload.locale.startsWith("zh") ? "zh" : "en");
-      }
       setKeyScale(event.payload.keyboardDisplayScale ?? 1.0);
       setKeyStyle(event.payload.keyboardDisplayStyle ?? "dark");
     });
@@ -214,16 +211,12 @@ export default function KeyboardWindow() {
     >
       {accessibilityGranted === false && displayKeys.length === 0 && (
         <div className={`key-badge style-${keyStyle}`} style={{ opacity: 0.7, fontSize: 13, padding: "6px 14px" }}>
-          {locale === "zh"
-            ? "⚠️ 请在 系统设置 → 隐私与安全 → 辅助功能 中授权本应用"
-            : "⚠️ Grant access in System Settings → Privacy → Accessibility"}
+          {t.keyboard_accessibility_hint}
         </div>
       )}
       {accessibilityGranted !== false && eventTapActive === false && displayKeys.length === 0 && (
         <div className={`key-badge style-${keyStyle}`} style={{ opacity: 0.7, fontSize: 13, padding: "6px 14px" }}>
-          {locale === "zh"
-            ? "⚠️ 请在 系统设置 → 隐私与安全 → 输入监控 中授权本应用"
-            : "⚠️ Grant access in System Settings → Privacy → Input Monitoring"}
+          {t.keyboard_input_monitoring_hint}
         </div>
       )}
       {displayKeys.map((dk) => (
@@ -245,16 +238,47 @@ export default function KeyboardWindow() {
             void invoke("toggle_keyboard_window", { enabled: false });
             setCtxMenu(null);
           }}>
-            {locale === "zh" ? "隐藏按键" : "Hide Keys"}
+            {t.keyboard_hide}
           </button>
           <button type="button" onClick={() => {
             void invoke("open_settings_window");
             setCtxMenu(null);
           }}>
-            {locale === "zh" ? "打开设置" : "Settings"}
+            {t.keyboard_open_settings}
           </button>
         </div>
       )}
     </div>
+  );
+}
+
+export default function KeyboardWindow() {
+  const [locale, setLocale] = useState<Locale>(detectLocale());
+
+  useEffect(() => {
+    const load = async () => {
+      const persisted = await getAppSettings();
+      if (persisted.locale) {
+        setLocale(persisted.locale as Locale);
+      }
+    };
+    void load();
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
+      if (event.payload.locale) {
+        setLocale(event.payload.locale as Locale);
+      }
+    });
+    return () => { void unlistenPromise.then((unlisten) => unlisten()); };
+  }, []);
+
+  const messages = getMessages(locale);
+
+  return (
+    <I18nProvider value={messages}>
+      <KeyboardContent />
+    </I18nProvider>
   );
 }

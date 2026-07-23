@@ -12,8 +12,8 @@ A desktop camera overlay for streaming and screen recording. Show your face in a
 - **Shape Presets** — Circle, Rounded Square, Mickey
 - **Beauty Filter** — Skin smoothing and brightness adjustment
 - **Keyboard Display** — Show pressed keys on screen with fade-out animation, perfect for tutorials and live demos
-- **Screen Recording** — Capture your screen with a draggable region lock, 3-second countdown, cursor click ripples & trail overlay, cursor-following auto zoom, configurable output directory, and save to MP4 (WebM fallback)
-- **Post-Capture Editor** — After each recording, a Screen-Studio-style editor opens: preview, trim the ends, pick export resolution (original/1080p/720p) and container (MP4/WebM), then export via the native save dialog
+- **Screen Recording** — Capture your screen with a draggable region lock, 3-second countdown, cursor click ripples & trail overlay, cursor-trajectory capture (for non-destructive auto zoom), configurable output directory, and save to MP4 (WebM fallback)
+- **Post-Capture Editor** — After each recording, a Screen-Studio-style editor opens: canvas preview with optional cursor-following auto zoom (toggle + factor slider, replayed from the recorded trajectory rather than baked in), trim the ends, pick export resolution (original/1080p/720p) and container (MP4/WebM), then export via the native save dialog
 - **Draggable** — Drag both camera and keyboard windows anywhere, positions are remembered
 - **Right-click Menu** — Quick access to settings, lock, mirror, and keyboard toggle
 - **System Tray** — Show/hide camera, toggle keyboard, start/stop recording, open settings, lock drag, quit
@@ -22,7 +22,8 @@ A desktop camera overlay for streaming and screen recording. Show your face in a
   - `Cmd/Ctrl + Shift + L` — Lock/Unlock drag
   - `Cmd/Ctrl + Shift + ,` — Open settings
   - `Cmd/Ctrl + Shift + R` — Start/Stop recording
-- **Settings Window** — Camera selection, shape, scale, mirror, beauty, keyboard display (fade delay, width), screen recording (region, output dir, fps, auto zoom, cursor effects)
+- **Settings Window** — Camera selection, shape, scale, mirror, beauty, keyboard display (fade delay, width), screen recording (region, output dir, fps, auto-zoom defaults, cursor effects)
+- **Dark / Light Theme** — Unified phosphor-terminal design across all windows; follows the system by default, overridable (System / Light / Dark) in Settings
 - **i18n** — English and 中文
 - **Cross-platform** — macOS, Linux, Windows
 

@@ -73,7 +73,9 @@ Floaty McFloatFace 是一个桌面开源项目，用于在录屏/直播场景中
 - 屏幕录制相关：
   - `app://mouse-down` / `app://mouse-up`：鼠标点击 `{ x, y, button, timestamp }`（物理屏幕像素，仅录制激活时 emit）
   - `app://mouse-move`：鼠标移动（同上）
-  - `app://recording-status`：录制状态广播 `{ active: bool }`
+  - `app://recording-status`：录制状态广播 `{ active: bool }`（倒计时结束、真正开始编码后才 active）
+  - `app://recording-cmd`：录制条 → pipeline 指令 `{ action: "toggle" | "toggle-pause" | "clear-info" | "sync" }`（纯前端事件）
+  - `app://recording-ui`：pipeline → 录制条 UI 状态广播 `{ status, elapsed, countdown, info }`（纯前端事件）
   - `app://region-started`：区域选择窗口已打开
   - `app://region-selected`：区域已确认 `{ x, y, width, height }` 或 `null`（重置为全屏）
   - `app://region-canceled`：区域选择已取消
@@ -90,17 +92,24 @@ Floaty McFloatFace 是一个桌面开源项目，用于在录屏/直播场景中
 - 前端 `getUserMedia` 采集
 - 自适应质量降级：1080p -> 720p -> 480p（30fps 优先）
 - 监听 `devicechange` 处理热插拔与自动恢复
+- WebKit 跨页面捕获互斥（latest wins，同页共存）：不同 webview 间新捕获会 mute 旧捕获（黑帧、无 `ended`），双向皆然；同一页面内摄像头 + 屏幕捕获可共存。因此 **录制 pipeline 宿主在 `main` 摄像头窗口**（`MainCameraWindow` 调 `useRecordingPipeline()`），录制条只是遥控器（`useRecordingRemote`，走 `app://recording-cmd` / `app://recording-ui`）。主窗只可隐藏不可关闭（关闭会杀掉录制）。摄像头 track 的 mute 恢复逻辑仍保留（应对其他 app 抢占），限 3 次重试。
 
 ## 屏幕录制策略
 
-- 混合捕获：前端 `getDisplayMedia` 抓画面 + Rust `CGEventTap` 上报全局鼠标坐标（物理像素；`CGEventGetLocation` 返回的是 points，tap 内按主屏 scale factor 换算后再 emit）
+- 混合捕获：前端 `getDisplayMedia` 抓画面 + Rust `CGEventTap` 上报全局鼠标坐标（物理像素；`CGEventGetLocation` 返回的是 points，tap 内按缓存的主屏 scale factor 换算后 emit——scale 在开启 tracking 时刷新，不在事件回调里查显示器列表；mouse-move 按 ~60Hz 节流，down/up 不节流）
 - 开始录制前有 3 秒倒计时（pipeline 的 `countdown` 状态，录制条大字覆盖层显示；倒计时中停止 = 取消，不产文件）
 - 鼠标 tap 复用键盘功能的同一个 `CGEventTap`（`src-tauri/src/keyboard/macos.rs`），零新权限；通过 `MOUSE_TRACKING_ENABLED` 原子门控，非录制时不 emit
-- 区域锁定：`recording` 窗口用隐藏 canvas 对 `getDisplayMedia` 流做 `drawImage` crop，再 `captureStream` 喂给 `MediaRecorder`（MP4/H.264 优先，WebM/VP9 兜底；`pickMimeType` 探测，`extensionForMime` 决定落盘扩展名）。crop 数学在 `src/lib/coords.ts` 的 `computeCropRect`；启动时 `validateCaptureAssumption` 校验捕获帧是否匹配主屏物理尺寸，不匹配（多屏/窗口/tab 捕获）会 emit `app://camera-error` 提示。
+- 区域锁定：`recording` 窗口用隐藏 canvas 对 `getDisplayMedia` 流做 `drawImage` crop，再 `captureStream` 喂给 `MediaRecorder`（MP4/H.264 优先，WebM/VP9 兜底；`pickMimeType` 探测，`extensionForMime` 决定落盘扩展名）。crop 数学在 `src/lib/coords.ts` 的 `computeCropRect`。**捕获约定（关键，勿回退）**：`getDisplayMedia` **不请求 width/height**——向 WKWebView 请求物理尺寸会让它分配物理大小的缓冲、把 1x 内容画在左上、其余填 padding（黑或旧帧垃圾），且录制中可能切换模式；历史上所有"黑边/冻结条带"bug 都源于此。不加约束时轨道尺寸=内容实际尺寸、帧始终被填满，物理坐标→帧坐标的换算是纯算术：`k = videoWidth ÷ primaryMonitor 物理宽`（`applyScale`），region 和鼠标轨迹乘 k 进帧空间，k 写入 sidecar 供 zoom 回放。无任何像素探测（原 `contentScale.ts` 探测模块已删除）。draw 循环（setInterval 驱动，防隐藏窗口 rAF 节流）处理两种边界：轨道尺寸帧间变化 → 当帧算术重算 crop；源矩形与帧边界求交后按比例映射（drawImage 对越界源会裁剪并缩小目标区域，不处理会留下永不重画的"冻结第一帧"条带），发生裁剪的帧先黑底填充，正常帧不做 clearRect（opaque context 全覆盖）。输出 canvas 尺寸保持首帧 crop 不变（encoder 不能中途变分辨率）。region 按 `contentScale` 折算进内容空间裁剪，该比例写入 sidecar 供 zoom 回放折算轨迹。
 - 光标特效：独立 click-through overlay 窗口，仅录制时显示；坐标换算走 `src/lib/coords.ts` 的 `physicalToCss`。
 - 自动缩放（auto zoom）：开启后录制画面跟随鼠标放大（`recordingAutoZoom` + `recordingZoomFactor` 设置项）。crop 循环每帧用 `coords.ts` 的 `computeZoomedCrop`（围绕光标的放大窗口，钳制在基准 crop 内）+ `smoothCrop`（帧间插值）计算动态 crop；鼠标活动后 `ZOOM_HOLD_MS` 内保持放大，之后平滑缩回。输出 canvas 尺寸固定为基准 crop，`drawImage` 完成放大。光标 overlay 关闭时由 pipeline 自行用 `set_mouse_tracking_enabled` 门控鼠标事件。
-- 输出：录制停止后先经 `save_recording_draft` 把原始片段写入 temp dir（`floaty-drafts/`，>24h 自动清理），随即打开 editor 窗口做录后微调（裁剪 / 分辨率 / MP4 或 WebM 容器），导出走 `src/lib/exportVideo.ts` 的 `renderExport`（隐藏 video → canvas 重采样 → MediaRecorder 实时重编码，音频经 WebAudio 静默混入），最后经 `save_recording`（`tauri-plugin-dialog` 保存对话框）落盘。默认目录由 `recording::store::resolve_output_dir` 解析（优先 `AppSettings.recording_output_dir`，否则 `~/Movies/Floaty` / 非 macOS `~/Videos/Floaty`）；命名由 `recording::store::make_filename` 生成。字节经 invoke 直传 `Uint8Array` → Rust `Vec<u8>`（不要 `Array.from`，会 JSON 化导致内存爆炸）；editor 读草稿用 `read_recording_file` 的 raw binary response。
+- 输出：录制停止后先经 `save_recording_draft` 把原始片段写入 temp dir（`floaty-drafts/`，>24h 自动清理），随即打开 editor 窗口做录后微调（裁剪 / 分辨率（720p–4K，`scaledDimensions` 支持上采样——1x 捕获导 4K 是合法场景）/ 画幅 / MP4 或 WebM 容器），导出走 `src/lib/exportVideo.ts` 的 `renderExport`（隐藏 video → canvas 重采样 → MediaRecorder 实时重编码，音频经 WebAudio 静默混入；画幅预设 `ASPECT_RATIOS`：原始 / 16:9 / 9:16 / 1:1，语义是 **cover 取景窗**而非 contain 黑边——`coverWindow` 算源内最大画幅形状视窗，`computeFrameWindow` 统一驱动预览与导出：视窗跟随光标平移（无轨迹则居中）、zoom 激活时进一步缩小视窗，输出始终填满无黑边；zoom 进/出判定用 `filterSignificantActivity` 过滤微抖动的轨迹，焦点跟随仍用原始轨迹，`ZOOM_HOLD_MS = 2600`。编辑器预览 canvas 在 zoom 开启或选了固定画幅时激活，跑同一个 `computeFrameWindow`，所见即导出），最后经 `save_recording`（`tauri-plugin-dialog` 保存对话框）落盘。默认目录由 `recording::store::resolve_output_dir` 解析（优先 `AppSettings.recording_output_dir`，否则 `~/Movies/Floaty` / 非 macOS `~/Videos/Floaty`）；命名由 `recording::store::make_filename` 生成。字节经 invoke 直传 `Uint8Array` → Rust `Vec<u8>`（不要 `Array.from`，会 JSON 化导致内存爆炸）；editor 读草稿用 `read_recording_file` 的 raw binary response。
 - macOS 优先：Windows/Linux 的鼠标 tap 为打桩实现，文档标注 planned
+
+## 主题机制（dark/light）
+
+- Token 单一真相源：`src/styles.css`（暗色 `:root` + 亮色 `[data-theme="light"]` 覆盖），组件/样式禁止硬编码颜色，一律 `var(--*)`。
+- `AppSettings.theme: "system" | "light" | "dark"`（默认 `system`），设置页切换后随 `app://settings-updated` 广播；`src/lib/theme.ts` 的 `initTheme()` 已在全部 7 个入口接线，`system` 跟随 `prefers-color-scheme`。
+- 字体本地打包：Outfit + Share Tech Mono（`src/assets/fonts/`，`@font-face`）。
 
 ## 开发命令
 

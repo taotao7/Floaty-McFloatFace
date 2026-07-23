@@ -177,6 +177,28 @@ function SettingsContent() {
           <h2>{t.appearance}</h2>
         </div>
 
+        <div className="setting-row" style={{ marginBottom: 12 }}>
+          <div>
+            <Label>{t.theme}</Label>
+            <p className="hint">{t.theme_hint}</p>
+          </div>
+          <Select
+            value={settings.theme}
+            onValueChange={(value) => {
+              void commit({ ...settings, theme: value as AppSettings["theme"] });
+            }}
+          >
+            <SelectTrigger style={{ width: 140, height: 28, fontSize: 12, padding: "0 8px" }}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">{t.theme_system}</SelectItem>
+              <SelectItem value="light">{t.theme_light}</SelectItem>
+              <SelectItem value="dark">{t.theme_dark}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="shape-grid">
           {shapeOptions.map((shape) => (
             <button

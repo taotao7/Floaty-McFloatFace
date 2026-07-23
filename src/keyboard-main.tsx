@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client";
 import KeyboardWindow from "./windows/KeyboardWindow";
 import "./styles.css";
 import "./lib/disableContextMenu";
+import { initTheme } from "./lib/theme";
+
+initTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { confirmRegion, cancelRegionSelect } from "../lib/tauri";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { confirmRegion, cancelRegionSelect, getAppSettings } from "../lib/tauri";
 import { cssToPhysical } from "../lib/coords";
-import type { RecordingRegion } from "../types/app";
+import type { AppSettings, RecordingRegion } from "../types/app";
+import { I18nProvider, getMessages, useI18n, detectLocale, type Locale } from "../i18n";
+import { EVT } from "../lib/events";
 
 interface Rect {
   x: number;
@@ -19,6 +23,38 @@ const MIN_SIZE = 40;
  * they share the coordinate space with the Rust mouse-event tap.
  */
 export default function RegionSelectWindow() {
+  const [locale, setLocale] = useState<Locale>(detectLocale());
+
+  useEffect(() => {
+    const load = async () => {
+      const persisted = await getAppSettings();
+      if (persisted.locale) {
+        setLocale(persisted.locale as Locale);
+      }
+    };
+    void load();
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<AppSettings>(EVT.SETTINGS_UPDATED, (event) => {
+      if (event.payload.locale) {
+        setLocale(event.payload.locale as Locale);
+      }
+    });
+    return () => { void unlistenPromise.then((unlisten) => unlisten()); };
+  }, []);
+
+  const messages = getMessages(locale);
+
+  return (
+    <I18nProvider value={messages}>
+      <RegionSelectContent />
+    </I18nProvider>
+  );
+}
+
+function RegionSelectContent() {
+  const t = useI18n();
   const [rect, setRect] = useState<Rect | null>(null);
   // Drag state lives in refs (never rendered) so the rAF-throttled move
   // handler always reads the latest values.
@@ -148,13 +184,24 @@ export default function RegionSelectWindow() {
     dragStart.current = { px: e.clientX, py: e.clientY, rect };
   };
 
-  const commit = (r: Rect) => {
+  const commit = async (r: Rect) => {
     if (r.width < MIN_SIZE || r.height < MIN_SIZE) return;
     const dpr = window.devicePixelRatio || 1;
     const region: RecordingRegion = cssToPhysical(
       { x: r.x, y: r.y, width: r.width, height: r.height },
       dpr,
     );
+    // Regions must be GLOBAL physical coords (the mouse-tap space). The
+    // overlay is asked to sit at (0,0), but the OS can shift it (menu bar
+    // avoidance, clamping); read the real outer position and offset, so the
+    // mapping holds even when the window origin isn't the screen origin.
+    const offset = await getCurrentWindow()
+      .outerPosition()
+      .catch(() => null);
+    if (offset) {
+      region.x += offset.x;
+      region.y += offset.y;
+    }
     void confirmRegion(region);
   };
 
@@ -179,7 +226,7 @@ export default function RegionSelectWindow() {
     >
       {/* Dim outside the selection via the rect's box-shadow (cheap to
           composite; a full-screen SVG mask repaints on every move). */}
-      {!rect && <div className="region-hint">Click and drag to select the recording area</div>}
+      {!rect && <div className="region-hint">{t.region_hint}</div>}
 
       {rect && rect.width > 0 && rect.height > 0 && (
         <>
@@ -207,14 +254,14 @@ export default function RegionSelectWindow() {
 
       {rect && rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && (
         <div className="region-toolbar" data-role="ui">
-          <button type="button" className="region-btn primary" onClick={() => commit(rect)}>
-            Confirm
+          <button type="button" className="region-btn primary" onClick={() => void commit(rect)}>
+            {t.region_confirm}
           </button>
           <button type="button" className="region-btn" onClick={() => void cancelRegionSelect()}>
-            Cancel
+            {t.region_cancel}
           </button>
           <button type="button" className="region-btn" onClick={handleFull}>
-            Full Screen
+            {t.recording_region_full}
           </button>
         </div>
       )}

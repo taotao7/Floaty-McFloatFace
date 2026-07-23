@@ -103,6 +103,8 @@ pub struct AppSettings {
     pub beauty_brightness: f64,
     #[serde(default = "default_locale")]
     pub locale: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default)]
     pub keyboard_display_enabled: bool,
     #[serde(default = "default_keyboard_position")]
@@ -190,6 +192,10 @@ fn default_locale() -> String {
     "en".to_string()
 }
 
+fn default_theme() -> String {
+    "system".to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -205,6 +211,7 @@ impl Default for AppSettings {
             beauty_smoothness: 30.0,
             beauty_brightness: 50.0,
             locale: "en".to_string(),
+            theme: "system".to_string(),
             keyboard_display_enabled: true,
             keyboard_display_position: "bottom-center".to_string(),
             keyboard_display_scale: 1.0,
@@ -595,39 +602,45 @@ fn toggle_recording_window(app: AppHandle, enabled: bool) -> Result<(), String> 
 
 #[tauri::command]
 fn start_region_select(app: AppHandle) -> Result<(), String> {
-    // Use the primary monitor dimensions to size the region-select overlay.
-    let (w, h) = app
+    // Primary monitor bounds, physical px + scale.
+    let (phys_w, phys_h, scale) = app
         .primary_monitor()
         .ok()
         .flatten()
-        .map(|m| (m.size().width as f64, m.size().height as f64))
-        .unwrap_or((1920.0, 1080.0));
+        .map(|m| (m.size().width as f64, m.size().height as f64, m.scale_factor()))
+        .unwrap_or((1920.0, 1080.0, 1.0));
 
-    // If the window exists already, reuse and reposition it.
-    if let Some(win) = app.get_webview_window(REGION_WINDOW_LABEL) {
-        win.set_size(Size::Physical(tauri::PhysicalSize::new(w as u32, h as u32)))
-            .map_err(|e| e.to_string())?;
-        win.set_position(PhysicalPosition::new(0, 0))
-            .map_err(|e| e.to_string())?;
-        win.show().map_err(|e| e.to_string())?;
-        let _ = win.set_focus();
+    // Ensure the window exists. NOTE: the builder's inner_size takes LOGICAL
+    // px — passing the physical size here used to request a window twice the
+    // screen (macOS then clamped/shifted it arbitrarily, so the overlay's CSS
+    // origin was NOT the screen origin and every region landed offset).
+    let win = if let Some(win) = app.get_webview_window(REGION_WINDOW_LABEL) {
+        win
     } else {
-        let win = build_overlay_window(
+        build_overlay_window(
             &app,
             OverlayWindowSpec {
                 label: REGION_WINDOW_LABEL,
                 url: "region.html",
                 title: "Select Recording Region",
-                width: w,
-                height: h,
+                width: phys_w / scale,
+                height: phys_h / scale,
                 resizable: false,
                 position_key: None,
                 anchor_origin: Some((0.0, 0.0)),
                 click_through: false,
             },
-        )?;
-        let _ = win.set_focus();
-    }
+        )?
+    };
+    // Enforce exact full-screen coverage in PHYSICAL units on both paths.
+    // The frontend additionally reads the window's real outer position on
+    // confirm, so even a menu-bar shift cannot skew the region mapping.
+    win.set_size(Size::Physical(tauri::PhysicalSize::new(phys_w as u32, phys_h as u32)))
+        .map_err(|e| e.to_string())?;
+    win.set_position(PhysicalPosition::new(0, 0))
+        .map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    let _ = win.set_focus();
 
     let _ = app.emit(evt::REGION_STARTED, ());
     Ok(())
@@ -700,6 +713,7 @@ fn set_cursor_overlay(app: AppHandle, enabled: bool) -> Result<(), String> {
             win.show().map_err(|e| e.to_string())?;
         }
         // Enable mouse coordinate emission from the event tap.
+        keyboard::refresh_mouse_scale(&app);
         keyboard::set_mouse_tracking(true);
     } else {
         keyboard::set_mouse_tracking(false);
@@ -711,7 +725,10 @@ fn set_cursor_overlay(app: AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_mouse_tracking_enabled(enabled: bool) {
+fn set_mouse_tracking_enabled(app: AppHandle, enabled: bool) {
+    if enabled {
+        keyboard::refresh_mouse_scale(&app);
+    }
     keyboard::set_mouse_tracking(enabled);
 }
 
@@ -860,13 +877,52 @@ async fn read_recording_file(path: String) -> Result<tauri::ipc::Response, Strin
 }
 
 /// Delete a draft after a successful export or when the user discards it.
+/// Also removes the metadata sidecar (`draft-<id>.json`) if present, so the
+/// two files don't get orphaned from each other.
 #[tauri::command]
 async fn delete_recording_draft(path: String) -> Result<(), String> {
     let p = std::path::PathBuf::from(&path);
     if p.starts_with(drafts_dir()) {
         let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(recording::store::meta_sidecar_path(&p));
     }
     Ok(())
+}
+
+/// Persist the metadata sidecar for a draft recording. `meta` is an opaque
+/// JSON value defined entirely by the frontend (`RecordingMeta` in
+/// `types/app.ts`); Rust never inspects its fields so the schema can evolve
+/// without a backend change. The sidecar lives next to the draft at
+/// `draft-<id>.json` and is pruned by the same 24h GC that sweeps the
+/// drafts directory.
+#[tauri::command]
+async fn save_recording_meta(draft_path: String, meta: serde_json::Value) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&draft_path);
+    if !p.starts_with(drafts_dir()) {
+        return Err("draft path is outside the drafts directory".to_string());
+    }
+    let json = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+    recording::store::write_recording_meta(&recording::store::meta_sidecar_path(&p), &json)
+}
+
+/// Read the metadata sidecar for a draft. Returns `null` when no sidecar
+/// exists (e.g. recordings made before sidecars were introduced), so the
+/// editor can gracefully degrade: no zoom preview, export still works.
+#[tauri::command]
+async fn read_recording_meta(draft_path: String) -> Result<Option<serde_json::Value>, String> {
+    let p = std::path::PathBuf::from(&draft_path);
+    if !p.starts_with(drafts_dir()) {
+        return Err("draft path is outside the drafts directory".to_string());
+    }
+    let sidecar = recording::store::meta_sidecar_path(&p);
+    match std::fs::read_to_string(&sidecar) {
+        Ok(body) => {
+            let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+            Ok(Some(value))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Open (or replace) the editor window for post-capture trim/export.
@@ -978,7 +1034,10 @@ fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = build_tray_menu(&app.handle(), &settings.locale)?;
 
     TrayIconBuilder::with_id("floaty-tray")
-        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?)
+        .icon(tauri::image::Image::from_bytes(include_bytes!(
+            "../icons/tray-icon.png"
+        ))?)
+        .icon_as_template(true)
         .tooltip("Floaty McFloatFace")
         .menu(&menu)
         .on_menu_event(|app, event| {
@@ -1147,6 +1206,8 @@ pub fn run() {
             get_editor_draft_path,
             read_recording_file,
             delete_recording_draft,
+            save_recording_meta,
+            read_recording_meta,
             open_editor_window
         ])
         .run(tauri::generate_context!())

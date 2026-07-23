@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, RecordingRegion, ShapePreset } from "../types/app";
+import type { AppSettings, RecordingMeta, RecordingRegion, ShapePreset } from "../types/app";
 
 export async function getAppSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("get_app_settings");
@@ -136,9 +136,27 @@ export async function readRecordingFile(path: string): Promise<Uint8Array> {
   return new Uint8Array(res);
 }
 
-/** Delete a draft (after export, or when discarded). */
+/** Delete a draft (after export, or when discarded). Also removes its sidecar. */
 export async function deleteRecordingDraft(path: string): Promise<void> {
   await invoke("delete_recording_draft", { path });
+}
+
+/**
+ * Persist the metadata sidecar (`draft-<id>.json`) for a draft recording.
+ * The draft path comes from `saveRecordingDraft`; the sidecar is written
+ * next to it with the `.json` extension.
+ */
+export async function saveRecordingMeta(draftPath: string, meta: RecordingMeta): Promise<void> {
+  await invoke("save_recording_meta", { draftPath, meta });
+}
+
+/**
+ * Read the metadata sidecar for a draft. Returns `null` when no sidecar
+ * exists (e.g. recordings made before sidecars existed) so callers can
+ * gracefully disable zoom preview.
+ */
+export async function readRecordingMeta(draftPath: string): Promise<RecordingMeta | null> {
+  return invoke<RecordingMeta | null>("read_recording_meta", { draftPath });
 }
 
 /** Open (or replace) the post-capture editor window. */

@@ -50,6 +50,27 @@ pub fn write_recording(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
+/// Write recording metadata (a pre-serialized JSON string) to `path`.
+/// Kept as its own function rather than reusing `write_recording` so the
+/// intent at the call site is explicit and a future streaming/pretty-print
+/// variant can diverge.
+pub fn write_recording_meta(path: &Path, json: &str) -> Result<(), String> {
+    std::fs::write(path, json.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Derive the metadata sidecar path for a draft recording.
+///
+/// A draft at `draft-<millis>.mp4` (or `.webm`) gets a sidecar at
+/// `draft-<millis>.json` in the same directory. The two files share a
+/// basename so they travel and prune together. Used by both the
+/// `save_recording_meta` / `read_recording_meta` commands and the draft
+/// deletion path so they agree on the layout.
+pub fn meta_sidecar_path(draft_path: &Path) -> PathBuf {
+    let mut out = draft_path.to_path_buf();
+    out.set_extension("json");
+    out
+}
+
 /// Format the current local time as `YYYYMMDD-HHMMSS` for filename use.
 /// Split out from `make_filename` so the filename builder stays pure and
 /// clock-free (and therefore unit-testable).
@@ -151,6 +172,30 @@ mod tests {
         let path = dir.join("out.webm");
         write_recording(&path, b"hello").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn meta_sidecar_path_replaces_extension() {
+        assert_eq!(
+            meta_sidecar_path(std::path::Path::new("/tmp/floaty-drafts/draft-1234567.mp4")),
+            std::path::PathBuf::from("/tmp/floaty-drafts/draft-1234567.json")
+        );
+        assert_eq!(
+            meta_sidecar_path(std::path::Path::new("/tmp/floaty-drafts/draft-1234567.webm")),
+            std::path::PathBuf::from("/tmp/floaty-drafts/draft-1234567.json")
+        );
+    }
+
+    #[test]
+    fn write_recording_meta_roundtrip() {
+        let dir = std::env::temp_dir().join("floaty-store-test-meta");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("draft-9999.json");
+        let body = r#"{"captureWidth":2880,"cursor":[]}"#;
+        write_recording_meta(&path, body).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
